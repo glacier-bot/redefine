@@ -139,7 +139,7 @@ bool Application::RegisterShellNotifications()
     shellNotificationId_ = SHChangeNotifyRegister(
         messageWindow_,
         SHCNRF_InterruptLevel | SHCNRF_ShellLevel | SHCNRF_NewDelivery,
-        SHCNE_RENAMEITEM | SHCNE_RENAMEFOLDER | SHCNE_DELETE | SHCNE_RMDIR,
+        SHCNE_RENAMEITEM | SHCNE_RENAMEFOLDER | SHCNE_DELETE | SHCNE_RMDIR | SHCNE_CREATE | SHCNE_MKDIR,
         kShellChangeMessage,
         1,
         &entry);

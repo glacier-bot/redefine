@@ -7,6 +7,7 @@
 #include <wil/resource.h>
 
 #include <ctime>
+#include <cstring>
 #include <memory>
 #include <system_error>
 #include <utility>
@@ -138,7 +139,27 @@ Database OpenDatabase(const std::filesystem::path& path, std::wstring& error)
         database.reset();
         return database;
     }
-    sqlite3_exec(database.get(), "PRAGMA user_version = 3;", nullptr, nullptr, nullptr);
+    sqlite3_stmt* originalIdentityCheck = nullptr;
+    const bool hasOriginalIdentity = sqlite3_prepare_v2(
+        database.get(),
+        "SELECT original_volume_id, original_file_id FROM notes LIMIT 0;",
+        -1,
+        &originalIdentityCheck,
+        nullptr) == SQLITE_OK;
+    sqlite3_finalize(originalIdentityCheck);
+    if (!hasOriginalIdentity && sqlite3_exec(
+            database.get(),
+            "ALTER TABLE notes ADD COLUMN original_volume_id INTEGER;"
+            "ALTER TABLE notes ADD COLUMN original_file_id BLOB;",
+            nullptr,
+            nullptr,
+            nullptr) != SQLITE_OK)
+    {
+        error = L"无法升级本地无主身份记录";
+        database.reset();
+        return database;
+    }
+    sqlite3_exec(database.get(), "PRAGMA user_version = 4;", nullptr, nullptr, nullptr);
     return database;
 }
 
@@ -204,27 +225,45 @@ bool OrphanBoundNotes(
     const std::wstring& path,
     bool directory,
     const std::wstring& reason,
-    std::wstring& error)
+    std::wstring& error,
+    bool respectLinks = true,
+    const ObjectIdentity* identity = nullptr)
 {
     Statement query(nullptr, sqlite3_finalize);
-    const char* exactSql = "SELECT note_id, last_path, link_count FROM object_bindings WHERE last_path = ?1 COLLATE NOCASE;";
+    const char* exactSql = "SELECT note_id, last_path, link_count, volume_id, file_id FROM object_bindings WHERE last_path = ?1 COLLATE NOCASE;";
     const char* directorySql =
-        "SELECT note_id, last_path, link_count FROM object_bindings "
+        "SELECT note_id, last_path, link_count, volume_id, file_id FROM object_bindings "
         "WHERE last_path = ?1 COLLATE NOCASE "
         "OR (substr(last_path, 1, length(?1)) = ?1 COLLATE NOCASE "
         "AND substr(last_path, length(?1) + 1, 1) = '\\');";
-    if (!Prepare(database, directory ? directorySql : exactSql, query, error))
+    if (identity != nullptr)
     {
-        return false;
+        if (!Prepare(
+                database,
+                "SELECT note_id, last_path, link_count, volume_id, file_id FROM object_bindings WHERE volume_id = ?1 AND file_id = ?2;",
+                query,
+                error))
+        {
+            return false;
+        }
+        BindIdentity(query.get(), 1, *identity);
     }
-    const std::string utf8Path = ToUtf8(path);
-    sqlite3_bind_text(query.get(), 1, utf8Path.c_str(), static_cast<int>(utf8Path.size()), SQLITE_TRANSIENT);
+    else
+    {
+        if (!Prepare(database, directory ? directorySql : exactSql, query, error))
+        {
+            return false;
+        }
+        const std::string utf8Path = ToUtf8(path);
+        sqlite3_bind_text(query.get(), 1, utf8Path.c_str(), static_cast<int>(utf8Path.size()), SQLITE_TRANSIENT);
+    }
 
     struct Candidate
     {
         std::int64_t noteId;
         std::wstring originalPath;
         int linkCount;
+        ObjectIdentity identity;
     };
     std::vector<Candidate> candidates;
     int result = SQLITE_ERROR;
@@ -234,6 +273,13 @@ bool OrphanBoundNotes(
             sqlite3_column_int64(query.get(), 0),
             FromUtf8(reinterpret_cast<const char*>(sqlite3_column_text(query.get(), 1))),
             sqlite3_column_int(query.get(), 2)});
+        auto& candidate = candidates.back();
+        candidate.identity.volumeId = static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 3));
+        const auto* fileId = static_cast<const std::uint8_t*>(sqlite3_column_blob(query.get(), 4));
+        if (fileId != nullptr)
+        {
+            memcpy(candidate.identity.fileId.data(), fileId, candidate.identity.fileId.size());
+        }
     }
     if (result != SQLITE_DONE)
     {
@@ -256,7 +302,7 @@ bool OrphanBoundNotes(
     const bool prepared = Prepare(
         database,
         "UPDATE notes SET status = 'Orphan', orphan_reason = ?1, orphan_since = ?2, "
-        "updated_at = ?2, original_path = ?3 WHERE note_id = ?4;",
+        "updated_at = ?2, original_path = ?3, original_volume_id = ?5, original_file_id = ?6 WHERE note_id = ?4;",
         update,
         error) && Prepare(database, "DELETE FROM object_bindings WHERE note_id = ?1;", remove, error) &&
         Prepare(database, "UPDATE object_bindings SET link_count = link_count - 1 WHERE note_id = ?1;", decrement, error);
@@ -270,7 +316,7 @@ bool OrphanBoundNotes(
     const std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
     for (const auto& candidate : candidates)
     {
-        if (!directory && candidate.linkCount > 1)
+        if (respectLinks && !directory && candidate.linkCount > 1)
         {
             sqlite3_bind_int64(decrement.get(), 1, candidate.noteId);
             const int decrementResult = sqlite3_step(decrement.get());
@@ -290,6 +336,13 @@ bool OrphanBoundNotes(
         sqlite3_bind_int64(update.get(), 2, now);
         sqlite3_bind_text(update.get(), 3, utf8OriginalPath.c_str(), static_cast<int>(utf8OriginalPath.size()), SQLITE_TRANSIENT);
         sqlite3_bind_int64(update.get(), 4, candidate.noteId);
+        sqlite3_bind_int64(update.get(), 5, static_cast<sqlite3_int64>(candidate.identity.volumeId));
+        sqlite3_bind_blob(
+            update.get(),
+            6,
+            candidate.identity.fileId.data(),
+            static_cast<int>(candidate.identity.fileId.size()),
+            SQLITE_TRANSIENT);
         sqlite3_bind_int64(remove.get(), 1, candidate.noteId);
         if (sqlite3_step(update.get()) != SQLITE_DONE || sqlite3_step(remove.get()) != SQLITE_DONE)
         {
@@ -306,6 +359,145 @@ bool OrphanBoundNotes(
     if (sqlite3_exec(database, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK)
     {
         error = L"无法提交无主备注事务";
+        sqlite3_exec(database, "ROLLBACK;", nullptr, nullptr, nullptr);
+        return false;
+    }
+    return true;
+}
+
+bool RestoreMovedNotes(
+    sqlite3* database,
+    const ObjectIdentity& identity,
+    const std::wstring& newPath,
+    bool directory,
+    std::wstring& error)
+{
+    const std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
+    Statement rootQuery(nullptr, sqlite3_finalize);
+    if (!Prepare(
+            database,
+            "SELECT note_id, original_path, orphan_reason FROM notes "
+            "WHERE status = 'Orphan' AND original_volume_id = ?1 AND original_file_id = ?2 "
+            "AND orphan_since >= ?3 LIMIT 1;",
+            rootQuery,
+            error))
+    {
+        return false;
+    }
+    BindIdentity(rootQuery.get(), 1, identity);
+    sqlite3_bind_int64(rootQuery.get(), 3, now - 10);
+    if (sqlite3_step(rootQuery.get()) != SQLITE_ROW)
+    {
+        return true;
+    }
+    const std::wstring oldRoot = FromUtf8(reinterpret_cast<const char*>(sqlite3_column_text(rootQuery.get(), 1)));
+    const std::wstring reason = FromUtf8(reinterpret_cast<const char*>(sqlite3_column_text(rootQuery.get(), 2)));
+    const std::wstring expectedReason = directory ? L"文件夹已删除" : L"文件已删除";
+    if (oldRoot.empty() || reason != expectedReason || _wcsicmp(oldRoot.c_str(), newPath.c_str()) == 0 ||
+        wcscmp(PathFindFileNameW(oldRoot.c_str()), PathFindFileNameW(newPath.c_str())) != 0)
+    {
+        return true;
+    }
+
+    Statement query(nullptr, sqlite3_finalize);
+    const char* fileSql =
+        "SELECT note_id, original_path, original_volume_id, original_file_id FROM notes "
+        "WHERE status = 'Orphan' AND original_path = ?1 COLLATE NOCASE AND orphan_since >= ?2;";
+    const char* directorySql =
+        "SELECT note_id, original_path, original_volume_id, original_file_id FROM notes "
+        "WHERE status = 'Orphan' AND orphan_since >= ?2 AND (original_path = ?1 COLLATE NOCASE "
+        "OR (substr(original_path, 1, length(?1)) = ?1 COLLATE NOCASE "
+        "AND substr(original_path, length(?1) + 1, 1) = '\\'));";
+    if (!Prepare(database, directory ? directorySql : fileSql, query, error))
+    {
+        return false;
+    }
+    const std::string utf8OldRoot = ToUtf8(oldRoot);
+    sqlite3_bind_text(query.get(), 1, utf8OldRoot.c_str(), static_cast<int>(utf8OldRoot.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_int64(query.get(), 2, now - 10);
+
+    struct Candidate
+    {
+        std::int64_t noteId;
+        std::wstring oldPath;
+        ObjectIdentity identity;
+    };
+    std::vector<Candidate> candidates;
+    int result = SQLITE_ERROR;
+    while ((result = sqlite3_step(query.get())) == SQLITE_ROW)
+    {
+        Candidate candidate;
+        candidate.noteId = sqlite3_column_int64(query.get(), 0);
+        candidate.oldPath = FromUtf8(reinterpret_cast<const char*>(sqlite3_column_text(query.get(), 1)));
+        candidate.identity.volumeId = static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 2));
+        const auto* fileId = static_cast<const std::uint8_t*>(sqlite3_column_blob(query.get(), 3));
+        if (fileId != nullptr)
+        {
+            memcpy(candidate.identity.fileId.data(), fileId, candidate.identity.fileId.size());
+        }
+        candidates.push_back(std::move(candidate));
+    }
+    if (result != SQLITE_DONE || candidates.empty())
+    {
+        return true;
+    }
+
+    if (sqlite3_exec(database, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr) != SQLITE_OK)
+    {
+        error = L"无法开始同名移动恢复事务";
+        return false;
+    }
+    Statement update(nullptr, sqlite3_finalize);
+    Statement insert(nullptr, sqlite3_finalize);
+    const bool prepared = Prepare(
+        database,
+        "UPDATE notes SET status = 'Bound', orphan_reason = NULL, orphan_since = NULL, original_path = NULL, "
+        "original_volume_id = NULL, original_file_id = NULL, updated_at = ?2 WHERE note_id = ?1;",
+        update,
+        error) && Prepare(
+            database,
+            "INSERT INTO object_bindings(note_id, volume_id, file_id, last_path, bound_at, link_count) "
+            "VALUES(?1, ?2, ?3, ?4, ?5, ?6);",
+            insert,
+            error);
+    if (!prepared)
+    {
+        sqlite3_exec(database, "ROLLBACK;", nullptr, nullptr, nullptr);
+        return false;
+    }
+
+    for (const auto& candidate : candidates)
+    {
+        const std::wstring targetPath = directory ? newPath + candidate.oldPath.substr(oldRoot.size()) : newPath;
+        std::wstring identityError;
+        const auto currentIdentity = ReadObjectIdentity(targetPath, identityError);
+        if (!currentIdentity || currentIdentity->volumeId != candidate.identity.volumeId ||
+            currentIdentity->fileId != candidate.identity.fileId)
+        {
+            continue;
+        }
+        const std::string utf8TargetPath = ToUtf8(targetPath);
+        sqlite3_bind_int64(update.get(), 1, candidate.noteId);
+        sqlite3_bind_int64(update.get(), 2, now);
+        sqlite3_bind_int64(insert.get(), 1, candidate.noteId);
+        BindIdentity(insert.get(), 2, *currentIdentity);
+        sqlite3_bind_text(insert.get(), 4, utf8TargetPath.c_str(), static_cast<int>(utf8TargetPath.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(insert.get(), 5, now);
+        sqlite3_bind_int(insert.get(), 6, static_cast<int>(currentIdentity->linkCount));
+        if (sqlite3_step(update.get()) != SQLITE_DONE || sqlite3_step(insert.get()) != SQLITE_DONE)
+        {
+            error = L"无法恢复同名移动绑定";
+            sqlite3_exec(database, "ROLLBACK;", nullptr, nullptr, nullptr);
+            return false;
+        }
+        sqlite3_reset(update.get());
+        sqlite3_clear_bindings(update.get());
+        sqlite3_reset(insert.get());
+        sqlite3_clear_bindings(insert.get());
+    }
+    if (sqlite3_exec(database, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK)
+    {
+        error = L"无法提交同名移动恢复事务";
         sqlite3_exec(database, "ROLLBACK;", nullptr, nullptr, nullptr);
         return false;
     }
@@ -500,7 +692,8 @@ bool NotesRepository::ApplyShellChange(
     error.clear();
     const bool rename = event == SHCNE_RENAMEITEM || event == SHCNE_RENAMEFOLDER;
     const bool remove = event == SHCNE_DELETE || event == SHCNE_RMDIR;
-    if (path.empty() || (!rename && !remove))
+    const bool create = event == SHCNE_CREATE || event == SHCNE_MKDIR;
+    if (path.empty() || (!rename && !remove && !create))
     {
         return true;
     }
@@ -515,7 +708,13 @@ bool NotesRepository::ApplyShellChange(
         return false;
     }
 
-    const bool directory = event == SHCNE_RENAMEFOLDER || event == SHCNE_RMDIR;
+    const bool directory = event == SHCNE_RENAMEFOLDER || event == SHCNE_RMDIR || event == SHCNE_MKDIR;
+    if (create)
+    {
+        std::wstring identityError;
+        const auto identity = ReadObjectIdentity(path, identityError);
+        return identity ? RestoreMovedNotes(database.get(), *identity, path, directory, error) : true;
+    }
     if (rename)
     {
         const bool recycle = !newPath.empty() && StrStrIW(newPath.c_str(), L":\\$Recycle.Bin\\") != nullptr;
@@ -529,7 +728,31 @@ bool NotesRepository::ApplyShellChange(
                 crossVolume ? L"跨卷移动后源对象已删除" : directory ? L"文件夹已移入回收站" : L"文件已移入回收站",
                 error);
         }
-        return UpdateBoundPaths(database.get(), path, newPath, directory, error);
+        const wchar_t* oldName = PathFindFileNameW(path.c_str());
+        const wchar_t* newName = PathFindFileNameW(newPath.c_str());
+        if (wcscmp(oldName, newName) == 0)
+        {
+            return UpdateBoundPaths(database.get(), path, newPath, directory, error);
+        }
+
+        const wchar_t* reason = directory ? L"文件夹重命名后视为新对象" : L"文件重命名后视为新对象";
+        if (!directory)
+        {
+            std::wstring identityError;
+            const auto identity = ReadObjectIdentity(newPath, identityError);
+            if (identity && !OrphanBoundNotes(
+                    database.get(),
+                    path,
+                    false,
+                    reason,
+                    error,
+                    false,
+                    &*identity))
+            {
+                return false;
+            }
+        }
+        return OrphanBoundNotes(database.get(), path, directory, reason, error, false);
     }
 
     return OrphanBoundNotes(

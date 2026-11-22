@@ -1,4 +1,5 @@
 #include "panel_window.hpp"
+#include "resource.h"
 
 #include <RichEdit.h>
 #include <Windowsx.h>
@@ -84,6 +85,8 @@ bool PanelWindow::Create(HINSTANCE instance)
     windowClass.lpfnWndProc = WindowProc;
     windowClass.lpszClassName = kPanelClassName;
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    windowClass.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_APPLICATION_ICON));
+    windowClass.hIconSm = LoadIconW(instance, MAKEINTRESOURCEW(IDI_APPLICATION_ICON));
     if (RegisterClassExW(&windowClass) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
     {
         return false;

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.30)
-project(redefine VERSION 0.4.0 LANGUAGES C CXX)
+project(redefine VERSION 0.5.0 LANGUAGES C CXX)
 
 include(cmake/dependencies.cmake)
 
@@ -11,8 +11,10 @@ add_executable(redefine WIN32
     src/notes_repository.cpp
     src/object_identity.cpp
     src/panel_window.cpp
+    src/redefine.ico
     src/redefine.manifest
     src/redefine.rc
+    src/resource.h
 )
 
 target_compile_definitions(redefine PRIVATE

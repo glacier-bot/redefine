@@ -1,4 +1,5 @@
 #include "application.hpp"
+#include "resource.h"
 
 #include <ShlObj.h>
 
@@ -266,7 +267,7 @@ void Application::AddTrayIcon()
     icon.uID = kTrayIconId;
     icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     icon.uCallbackMessage = kTrayMessage;
-    icon.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    icon.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_APPLICATION_ICON));
     wcscpy_s(icon.szTip, L"资源管理器备注原型");
     trayIconAdded_ = Shell_NotifyIconW(NIM_ADD, &icon) != FALSE;
 }

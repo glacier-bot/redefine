@@ -126,3 +126,22 @@ docs(design): 更新无主备注搜索规则
 - 不修复与本任务无关的既有失败，但应在交付时明确说明。
 - 不遗留测试输出、临时日志、缓存或调试文件。
 - 未完成验证或存在未解决问题时，不得宣称任务已经完成。
+
+### 卡巴斯基复扫
+
+Release 可执行文件或系统交互行为发生变化后，使用卡巴斯基对最终程序进行复扫。Git Bash 中的验证命令为：
+
+```bash
+KASPERSKY="C:/Program Files (x86)/Kaspersky Lab/Kaspersky 21.24/avp.com"
+"$KASPERSKY" SCAN //i0 //fa //iChecker=off //iSwift=off "$PWD/out/build/windows-x64-local/Release/redefine.exe"
+```
+
+参数要求：
+
+- `//i0`：仅报告，不清毒、不删除文件；在 cmd 或 PowerShell 中对应 `/i0`。
+- `//fa`：扫描全部文件。
+- `//iChecker=off //iSwift=off`：禁用扫描缓存，避免复用旧结果。
+- Git Bash 中选项使用双斜杠，防止 MSYS 将其转换为 `C:/Program Files/Git/...` 路径。
+- 卡巴斯基安装版本或构建目录变化时，同步更新命令中的路径。
+
+通过标准为扫描对象显示 `ok`，且 `Total detected: 0`、`Suspicions: 0`、`Errors: 0`。扫描停滞、对象被跳过或出现报警均不能视为通过；不得为了绕过检测而添加排除项。

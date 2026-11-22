@@ -146,6 +146,29 @@ void PanelWindow::ToggleDockSide()
     Reposition();
 }
 
+void PanelWindow::TogglePreview()
+{
+    if (!targetValid_)
+    {
+        return;
+    }
+
+    previewMode_ = !previewMode_;
+    previewScroll_ = 0.0F;
+    previewContentHeight_ = 0.0F;
+    if (previewMode_)
+    {
+        QueuePendingSave();
+        preview_.SetMarkdown(EditorText(editor_));
+    }
+    UpdateEditorLayout();
+    if (!previewMode_ && IsWindowVisible(window_))
+    {
+        SetFocus(editor_);
+    }
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
 void PanelWindow::ShowFor(HWND explorer, const ExplorerSnapshot& snapshot)
 {
     if (explorer == nullptr || !IsWindow(explorer) || IsIconic(explorer))
@@ -276,6 +299,9 @@ void PanelWindow::RefreshTarget()
     {
         noteStatus_ = error;
         targetDescription_.clear();
+        preview_.SetMarkdown(L"");
+        previewScroll_ = 0.0F;
+        previewContentHeight_ = 0.0F;
         UpdateEditorLayout();
         return;
     }
@@ -286,6 +312,9 @@ void PanelWindow::RefreshTarget()
     {
         noteStatus_ = error;
         targetValid_ = false;
+        preview_.SetMarkdown(L"");
+        previewScroll_ = 0.0F;
+        previewContentHeight_ = 0.0F;
         EnableWindow(editor_, FALSE);
         UpdateEditorLayout();
         return;
@@ -301,6 +330,12 @@ void PanelWindow::RefreshTarget()
     SendMessageW(editor_, EM_SETMODIFY, FALSE, 0);
     SendMessageW(editor_, EM_SETSEL, 0, 0);
     noteStatus_ = storedNote ? L"备注已加载，修改后自动保存" : L"尚无备注，输入后自动保存";
+    if (previewMode_)
+    {
+        preview_.SetMarkdown(note.markdown);
+    }
+    previewScroll_ = 0.0F;
+    previewContentHeight_ = 0.0F;
     UpdateEditorLayout();
 }
 
@@ -382,24 +417,41 @@ void PanelWindow::StopSaveWorker()
     }
 }
 
+D2D1_RECT_F PanelWindow::ContentBounds() const
+{
+    RECT client = {};
+    GetClientRect(window_, &client);
+    const UINT dpi = GetDpiForWindow(window_);
+    const int margin = MulDiv(16, dpi, 96);
+    const int top = MulDiv(180, dpi, 96);
+    return D2D1::RectF(
+        static_cast<float>(margin),
+        static_cast<float>(top),
+        static_cast<float>(std::max(margin, static_cast<int>(client.right) - margin)),
+        static_cast<float>(std::max(top, static_cast<int>(client.bottom) - margin)));
+}
+
 void PanelWindow::UpdateEditorLayout()
 {
     if (editor_ == nullptr)
     {
         return;
     }
-    RECT client = {};
-    GetClientRect(window_, &client);
-    const UINT dpi = GetDpiForWindow(window_);
-    const int margin = MulDiv(16, dpi, 96);
-    const int top = MulDiv(180, dpi, 96);
-    const int width = std::max(0, static_cast<int>(client.right) - margin * 2);
-    const int height = std::max(0, static_cast<int>(client.bottom) - top - margin);
-    const bool visible = !collapsed_ && height > 0;
+    const auto bounds = ContentBounds();
+    const int width = static_cast<int>(bounds.right - bounds.left);
+    const int height = static_cast<int>(bounds.bottom - bounds.top);
+    const bool visible = !collapsed_ && !previewMode_ && height > 0;
     ShowWindow(editor_, visible ? SW_SHOW : SW_HIDE);
     if (visible)
     {
-        SetWindowPos(editor_, nullptr, margin, top, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(
+            editor_,
+            nullptr,
+            static_cast<int>(bounds.left),
+            static_cast<int>(bounds.top),
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE);
     }
 }
 
@@ -499,7 +551,7 @@ void PanelWindow::Render()
     else
     {
         const bool controlsVisible = hovering_ || GetForegroundWindow() == window_;
-        const float titleRight = controlsVisible ? width - 188.0F : width - 16.0F;
+        const float titleRight = controlsVisible ? width - 252.0F : width - 16.0F;
         const wchar_t* title = !targetValid_ ? L"对象备注" : targetIdentity_.kind == NoteObjectKind::Directory ? L"文件夹备注" : L"文件备注";
         renderTarget_->DrawText(
             title,
@@ -521,6 +573,7 @@ void PanelWindow::Render()
             D2D1::RectF(16.0F, 138.0F, width - 16.0F, 172.0F),
             secondaryText.get());
 
+        previewButton_ = D2D1::RectF(width - 244.0F, 12.0F, width - 182.0F, 42.0F);
         collapseButton_ = D2D1::RectF(width - 88.0F, 12.0F, width - 12.0F, 42.0F);
         sideButton_ = D2D1::RectF(width - 174.0F, 12.0F, width - 96.0F, 42.0F);
         if (controlsVisible)
@@ -529,8 +582,51 @@ void PanelWindow::Render()
                 renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(rectangle, 6.0F, 6.0F), fill);
                 renderTarget_->DrawText(label, length, buttonFormat_.get(), rectangle, foreground);
             };
+            drawButton(previewButton_, previewMode_ ? L"编辑" : L"预览", 2, accent.get(), text.get());
             drawButton(sideButton_, L"换侧", 2, accent.get(), text.get());
             drawButton(collapseButton_, L"收起", 2, accent.get(), text.get());
+        }
+
+        if (previewMode_)
+        {
+            const auto bounds = ContentBounds();
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(bounds, 4.0F, 4.0F), background.get());
+            renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(bounds, 4.0F, 4.0F), border.get(), 1.0F);
+            const auto textBounds = D2D1::RectF(bounds.left + 10.0F, bounds.top + 8.0F, bounds.right - 10.0F, bounds.bottom - 8.0F);
+            const float viewHeight = std::max(0.0F, textBounds.bottom - textBounds.top);
+            previewContentHeight_ = preview_.ContentHeight(dwriteFactory_.get(), textBounds.right - textBounds.left);
+            const float maximumScroll = std::max(0.0F, previewContentHeight_ - viewHeight);
+            previewScroll_ = std::clamp(previewScroll_, 0.0F, maximumScroll);
+
+            renderTarget_->PushAxisAlignedClip(textBounds, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            if (preview_.IsEmpty())
+            {
+                const std::wstring placeholder = L"暂无备注，切换到“编辑”可输入内容。";
+                renderTarget_->DrawText(
+                    placeholder.c_str(),
+                    static_cast<UINT32>(placeholder.size()),
+                    bodyFormat_.get(),
+                    textBounds,
+                    secondaryText.get());
+            }
+            else
+            {
+                preview_.Render(renderTarget_.get(), dwriteFactory_.get(), textBounds, previewScroll_, text.get());
+            }
+            renderTarget_->PopAxisAlignedClip();
+
+            if (maximumScroll > 0.0F && viewHeight > 0.0F)
+            {
+                const float trackTop = bounds.top + 4.0F;
+                const float trackHeight = std::max(0.0F, bounds.bottom - bounds.top - 8.0F);
+                const float thumbHeight = std::max(24.0F, trackHeight * viewHeight / previewContentHeight_);
+                const float thumbTop = trackTop + (trackHeight - thumbHeight) * previewScroll_ / maximumScroll;
+                const auto thumb = D2D1::RoundedRect(
+                    D2D1::RectF(bounds.right - 5.0F, thumbTop, bounds.right - 2.0F, thumbTop + thumbHeight),
+                    1.5F,
+                    1.5F);
+                renderTarget_->FillRoundedRectangle(thumb, secondaryText.get());
+            }
         }
     }
 
@@ -603,7 +699,11 @@ LRESULT PanelWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         const float x = static_cast<float>(GET_X_LPARAM(lParam));
         const float y = static_cast<float>(GET_Y_LPARAM(lParam));
         const bool controlsVisible = hovering_ || GetForegroundWindow() == window_;
-        if (controlsVisible && Contains(collapseButton_, x, y))
+        if (controlsVisible && Contains(previewButton_, x, y))
+        {
+            TogglePreview();
+        }
+        else if (controlsVisible && Contains(collapseButton_, x, y))
         {
             ToggleCollapsed();
         }
@@ -613,6 +713,17 @@ LRESULT PanelWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         }
         return 0;
     }
+    case WM_MOUSEWHEEL:
+        if (previewMode_ && !collapsed_)
+        {
+            const auto bounds = ContentBounds();
+            const float viewHeight = std::max(0.0F, bounds.bottom - bounds.top - 16.0F);
+            const float maximumScroll = std::max(0.0F, previewContentHeight_ - viewHeight);
+            const float delta = static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) / WHEEL_DELTA * 48.0F;
+            previewScroll_ = std::clamp(previewScroll_ - delta, 0.0F, maximumScroll);
+            InvalidateRect(window_, nullptr, FALSE);
+        }
+        return 0;
     case WM_COMMAND:
         if (reinterpret_cast<HWND>(lParam) == editor_ && HIWORD(wParam) == EN_CHANGE)
         {

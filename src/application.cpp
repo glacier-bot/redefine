@@ -11,6 +11,7 @@ constexpr UINT kTrayIconId = 1;
 constexpr UINT kCommandToggle = 1001;
 constexpr UINT kCommandSwitchSide = 1002;
 constexpr UINT kCommandExit = 1003;
+constexpr UINT kCommandTogglePreview = 1004;
 }
 
 Application* Application::current_ = nullptr;
@@ -227,6 +228,7 @@ void Application::ShowTrayMenu()
     }
     AppendMenuW(menu, MF_STRING, kCommandToggle, L"展开或收起备注框");
     AppendMenuW(menu, MF_STRING, kCommandSwitchSide, L"切换左右位置");
+    AppendMenuW(menu, MF_STRING, kCommandTogglePreview, L"切换编辑或预览");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kCommandExit, L"退出");
 
@@ -254,6 +256,10 @@ void Application::ShowTrayMenu()
         break;
     case kCommandSwitchSide:
         panel_.ToggleDockSide();
+        ScheduleRefresh(0);
+        break;
+    case kCommandTogglePreview:
+        panel_.TogglePreview();
         ScheduleRefresh(0);
         break;
     case kCommandExit:

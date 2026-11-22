@@ -1,6 +1,7 @@
 #pragma once
 
 #include "explorer_tracker.hpp"
+#include "markdown_preview.hpp"
 #include "notes_repository.hpp"
 
 #include <Windows.h>
@@ -26,6 +27,7 @@ public:
     void Hide();
     void ToggleCollapsed();
     void ToggleDockSide();
+    void TogglePreview();
 
     HWND Hwnd() const;
 
@@ -51,6 +53,7 @@ private:
     void Render();
     void Reposition();
     void UpdateEditorLayout();
+    D2D1_RECT_F ContentBounds() const;
     void UpdateHoverState(bool hovering);
     void RefreshTarget();
     void OnEditChanged();
@@ -65,6 +68,7 @@ private:
     HMODULE richEditLibrary_ = nullptr;
     ExplorerSnapshot snapshot_;
     NotesRepository repository_;
+    MarkdownPreview preview_;
     ObjectIdentity targetIdentity_;
     std::wstring targetPath_;
     std::wstring targetDescription_;
@@ -75,6 +79,10 @@ private:
     bool dockRight_ = true;
     bool hovering_ = false;
     bool loadingText_ = false;
+    bool previewMode_ = false;
+    float previewScroll_ = 0.0F;
+    float previewContentHeight_ = 0.0F;
+    D2D1_RECT_F previewButton_ = {};
     D2D1_RECT_F collapseButton_ = {};
     D2D1_RECT_F sideButton_ = {};
 

@@ -60,6 +60,7 @@ private:
     D2D1_RECT_F ContentBounds() const;
     void UpdateHoverState(bool hovering);
     void RefreshTarget();
+    void UpdateBindingState(bool bound);
     void OnEditChanged();
     void QueuePendingSave();
     void SaveWorker();
@@ -76,7 +77,9 @@ private:
     ObjectIdentity targetIdentity_;
     std::wstring targetPath_;
     std::wstring noteStatus_;
+    std::wstring bindingText_ = L"未绑定";
     std::uint64_t generation_ = 0;
+    bool noteBound_ = false;
     bool targetValid_ = false;
     bool collapsed_ = false;
     bool dockRight_ = true;

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.30)
-project(redefine VERSION 0.3.4 LANGUAGES C CXX)
+project(redefine VERSION 0.4.0 LANGUAGES C CXX)
 
 include(cmake/dependencies.cmake)
 

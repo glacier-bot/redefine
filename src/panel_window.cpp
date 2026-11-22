@@ -2,6 +2,7 @@
 
 #include <RichEdit.h>
 #include <Windowsx.h>
+#include <shlwapi.h>
 #include <wil/resource.h>
 
 #include <algorithm>
@@ -51,6 +52,12 @@ HWND FindDescendantWindow(HWND parent, const wchar_t* className)
     WindowSearch search{className};
     EnumChildWindows(parent, FindDescendantProc, reinterpret_cast<LPARAM>(&search));
     return search.result;
+}
+
+std::wstring TargetName(const std::wstring& path)
+{
+    const wchar_t* name = PathFindFileNameW(path.c_str());
+    return name == nullptr || *name == L'\0' ? path : name;
 }
 }
 
@@ -310,6 +317,12 @@ void PanelWindow::Reposition()
     }
 }
 
+void PanelWindow::UpdateBindingState(bool bound)
+{
+    noteBound_ = bound;
+    bindingText_ = bound ? TargetName(targetPath_) : L"未绑定";
+}
+
 void PanelWindow::RefreshTarget()
 {
     std::wstring path;
@@ -342,6 +355,7 @@ void PanelWindow::RefreshTarget()
     QueuePendingSave();
     ++generation_;
     targetPath_ = path;
+    UpdateBindingState(false);
     targetValid_ = identity.has_value();
     if (identity)
     {
@@ -387,6 +401,7 @@ void PanelWindow::RefreshTarget()
     SendMessageW(editor_, EM_SETMODIFY, FALSE, 0);
     SendMessageW(editor_, EM_SETSEL, 0, 0);
     noteStatus_ = storedNote ? L"备注已加载，修改后自动保存" : L"尚无备注，输入后自动保存";
+    UpdateBindingState(storedNote.has_value());
     if (previewMode_)
     {
         preview_.SetMarkdown(note.markdown);
@@ -487,12 +502,13 @@ D2D1_RECT_F PanelWindow::ContentBounds() const
     GetClientRect(window_, &client);
     const UINT dpi = GetDpiForWindow(window_);
     const int margin = MulDiv(14, dpi, 96);
+    const int bottomMargin = MulDiv(36, dpi, 96);
     const int top = MulDiv(74, dpi, 96);
     return D2D1::RectF(
         static_cast<float>(margin),
         static_cast<float>(top),
         static_cast<float>(std::max(margin, static_cast<int>(client.right) - margin)),
-        static_cast<float>(std::max(top, static_cast<int>(client.bottom) - margin)));
+        static_cast<float>(std::max(top, static_cast<int>(client.bottom) - bottomMargin)));
 }
 
 void PanelWindow::UpdateEditorLayout()
@@ -591,11 +607,13 @@ void PanelWindow::Render()
     wil::com_ptr<ID2D1SolidColorBrush> text;
     wil::com_ptr<ID2D1SolidColorBrush> secondaryText;
     wil::com_ptr<ID2D1SolidColorBrush> accent;
+    wil::com_ptr<ID2D1SolidColorBrush> binding;
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xF7F8FA), background.put());
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xC7CCD4), border.put());
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x20242A), text.put());
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x626B78), secondaryText.put());
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xE7EEF8), accent.put());
+    renderTarget_->CreateSolidColorBrush(D2D1::ColorF(noteBound_ ? 0x2563EB : 0xC62828), binding.put());
 
     renderTarget_->BeginDraw();
     renderTarget_->Clear(D2D1::ColorF(0xDDE1E6));
@@ -686,6 +704,13 @@ void PanelWindow::Render()
                 renderTarget_->FillRoundedRectangle(thumb, secondaryText.get());
             }
         }
+
+        renderTarget_->DrawText(
+            bindingText_.c_str(),
+            static_cast<UINT32>(bindingText_.size()),
+            bodyFormat_.get(),
+            D2D1::RectF(14.0F, height - 27.0F, width - 14.0F, height - 6.0F),
+            binding.get());
     }
 
     if (const HRESULT result = renderTarget_->EndDraw(); result == D2DERR_RECREATE_TARGET)
@@ -800,6 +825,10 @@ LRESULT PanelWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         if (result && result->generation == generation_)
         {
             noteStatus_ = result->error.empty() ? L"已自动保存" : result->error;
+            if (result->error.empty())
+            {
+                UpdateBindingState(true);
+            }
             InvalidateRect(window_, nullptr, FALSE);
         }
         return 0;

@@ -41,7 +41,7 @@
 | 文件变更通知 | `SHChangeNotifyRegister` + 惰性校验 |
 | 系统托盘 | `Shell_NotifyIcon` |
 | 可选全局热键 | `RegisterHotKey` |
-| 首版文件拖放 | `DragAcceptFiles` + `WM_DROPFILES` |
+| 文件拖放 | OLE `IDropTarget` + `CF_HDROP` |
 | COM/Win32 辅助 | WIL |
 | 构建工具 | MSVC + Windows SDK；公共核心可使用 CMake |
 
@@ -299,7 +299,7 @@ Shell 通知不是完整文件系统审计日志。非 Shell 操作、应用未�
 
 用户将未追踪对象拖到目标无主备注卡片上，验证通过后自动完成绑定，不要求额外确认。
 
-首版可使用 Win32 文件拖放。未来若需要更细腻的拖动高亮或更多拖放来源，再升级为 OLE `IDropTarget`。
+采用 OLE `IDropTarget` 接收 `CF_HDROP` 文件拖放。单个文件经过目标卡片时，卡片显示蓝色边框、浅色背景和“松开以重绑”提示；移出卡片或取消拖动后立即恢复。多文件、空白区域和重绑进行中不接受放置。
 
 ### 8.2 绑定前验证
 

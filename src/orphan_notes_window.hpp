@@ -29,6 +29,8 @@ public:
     HWND Hwnd() const;
 
 private:
+    class DropTarget;
+
     struct WorkItem
     {
         std::uint64_t generation = 0;
@@ -73,6 +75,8 @@ private:
     void RunSearch(const WorkItem& request);
     void StopWorker();
     void BeginRebind(std::int64_t noteId, const std::wstring& path);
+    void DropFiles(const std::vector<std::wstring>& paths, POINT point);
+    void SetDropCard(int card);
     void OnSearchResult(std::unique_ptr<SearchResult> result);
     void OnRebindResult(std::unique_ptr<RebindResult> result);
     int CardAt(POINT point) const;
@@ -85,6 +89,7 @@ private:
     HWND regexButton_ = nullptr;
     HFONT controlFont_ = nullptr;
     WNDPROC originalEditProc_ = nullptr;
+    DropTarget* dropTarget_ = nullptr;
     NotesRepository repository_;
     std::vector<OrphanNote> results_;
     std::size_t totalMatches_ = 0;
@@ -94,7 +99,9 @@ private:
     bool imeComposing_ = false;
     bool searching_ = false;
     bool binding_ = false;
+    bool dropSingleFile_ = false;
     int hoveredCard_ = -1;
+    int dropCard_ = -1;
     float scrollOffset_ = 0.0F;
     std::uint64_t searchRevision_ = 0;
     std::uint64_t seenRevision_ = 0;

@@ -2,6 +2,7 @@
 #include "resource.h"
 
 #include <Windowsx.h>
+#include <ole2.h>
 #include <shellapi.h>
 #include <shlwapi.h>
 #include <re2/re2.h>
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <ctime>
 #include <memory>
+#include <new>
 #include <utility>
 
 namespace
@@ -137,7 +139,132 @@ std::wstring OrphanTime(std::int64_t value)
         local.tm_sec);
     return text;
 }
+
+bool ReadDroppedPaths(IDataObject* dataObject, std::vector<std::wstring>& paths)
+{
+    paths.clear();
+    if (dataObject == nullptr)
+    {
+        return false;
+    }
+    FORMATETC format = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+    STGMEDIUM medium = {};
+    if (FAILED(dataObject->GetData(&format, &medium)))
+    {
+        return false;
+    }
+    const HDROP drop = static_cast<HDROP>(medium.hGlobal);
+    const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+    for (UINT index = 0; index < count; ++index)
+    {
+        const UINT length = DragQueryFileW(drop, index, nullptr, 0);
+        std::wstring path(static_cast<std::size_t>(length), L'\0');
+        DragQueryFileW(drop, index, path.data(), length + 1);
+        paths.push_back(std::move(path));
+    }
+    ReleaseStgMedium(&medium);
+    return true;
 }
+}
+
+class OrphanNotesWindow::DropTarget final : public IDropTarget
+{
+public:
+    explicit DropTarget(OrphanNotesWindow& manager) : manager_(manager)
+    {
+    }
+
+    STDMETHODIMP QueryInterface(REFIID identifier, void** object) override
+    {
+        if (object == nullptr)
+        {
+            return E_POINTER;
+        }
+        if (identifier == IID_IUnknown || identifier == IID_IDropTarget)
+        {
+            *object = static_cast<IDropTarget*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *object = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    STDMETHODIMP_(ULONG) AddRef() override
+    {
+        return ++references_;
+    }
+
+    STDMETHODIMP_(ULONG) Release() override
+    {
+        const ULONG remaining = --references_;
+        if (remaining == 0)
+        {
+            delete this;
+        }
+        return remaining;
+    }
+
+    STDMETHODIMP DragEnter(IDataObject* dataObject, DWORD, POINTL point, DWORD* effect) override
+    {
+        if (effect == nullptr)
+        {
+            return E_POINTER;
+        }
+        std::vector<std::wstring> paths;
+        manager_.dropSingleFile_ = ReadDroppedPaths(dataObject, paths) && paths.size() == 1;
+        *effect = UpdateEffect(point);
+        return S_OK;
+    }
+
+    STDMETHODIMP DragOver(DWORD, POINTL point, DWORD* effect) override
+    {
+        if (effect == nullptr)
+        {
+            return E_POINTER;
+        }
+        *effect = UpdateEffect(point);
+        return S_OK;
+    }
+
+    STDMETHODIMP DragLeave() override
+    {
+        manager_.dropSingleFile_ = false;
+        manager_.SetDropCard(-1);
+        return S_OK;
+    }
+
+    STDMETHODIMP Drop(IDataObject* dataObject, DWORD, POINTL point, DWORD* effect) override
+    {
+        if (effect == nullptr)
+        {
+            return E_POINTER;
+        }
+        std::vector<std::wstring> paths;
+        ReadDroppedPaths(dataObject, paths);
+        const bool accepted = manager_.dropSingleFile_ && manager_.dropCard_ >= 0 && paths.size() == 1 && !manager_.binding_;
+        POINT clientPoint = {point.x, point.y};
+        ScreenToClient(manager_.window_, &clientPoint);
+        manager_.dropSingleFile_ = false;
+        manager_.SetDropCard(-1);
+        manager_.DropFiles(paths, clientPoint);
+        *effect = accepted ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+        return S_OK;
+    }
+
+private:
+    DWORD UpdateEffect(POINTL point)
+    {
+        POINT clientPoint = {point.x, point.y};
+        ScreenToClient(manager_.window_, &clientPoint);
+        const int card = manager_.dropSingleFile_ && !manager_.binding_ ? manager_.CardAt(clientPoint) : -1;
+        manager_.SetDropCard(card);
+        return card >= 0 ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+    }
+
+    OrphanNotesWindow& manager_;
+    ULONG references_ = 1;
+};
 
 OrphanNotesWindow::OrphanNotesWindow(std::filesystem::path databasePath) : repository_(std::move(databasePath))
 {
@@ -177,7 +304,7 @@ bool OrphanNotesWindow::Create(HINSTANCE instance)
     }
 
     window_ = CreateWindowExW(
-        WS_EX_ACCEPTFILES,
+        0,
         kWindowClassName,
         L"无主备注管理",
         WS_OVERLAPPEDWINDOW | WS_VSCROLL,
@@ -247,7 +374,17 @@ bool OrphanNotesWindow::Create(HINSTANCE instance)
         searchEdit_,
         GWLP_WNDPROC,
         reinterpret_cast<LONG_PTR>(&OrphanNotesWindow::EditProc)));
-    DragAcceptFiles(window_, TRUE);
+    dropTarget_ = new (std::nothrow) DropTarget(*this);
+    if (dropTarget_ == nullptr)
+    {
+        return false;
+    }
+    if (FAILED(RegisterDragDrop(window_, dropTarget_)))
+    {
+        dropTarget_->Release();
+        dropTarget_ = nullptr;
+        return false;
+    }
     LayoutControls();
     workerThread_ = std::thread(&OrphanNotesWindow::SearchWorker, this);
     return true;
@@ -413,12 +550,14 @@ void OrphanNotesWindow::Render()
     wil::com_ptr<ID2D1SolidColorBrush> border;
     wil::com_ptr<ID2D1SolidColorBrush> card;
     wil::com_ptr<ID2D1SolidColorBrush> hoveredCard;
+    wil::com_ptr<ID2D1SolidColorBrush> dropBorder;
     wil::com_ptr<ID2D1SolidColorBrush> error;
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x20242A), text.put());
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x626B78), secondaryText.put());
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xD7DCE3), border.put());
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFF), card.put());
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xE8F0FE), hoveredCard.put());
+    renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x2563EB), dropBorder.put());
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xC62828), error.put());
 
     renderTarget_->BeginDraw();
@@ -460,8 +599,9 @@ void OrphanNotesWindow::Render()
             const auto& note = results_[index];
             const auto rectangle = D2D1::RectF(list.left, top, list.right, top + kCardHeight);
             const auto rounded = D2D1::RoundedRect(rectangle, 8.0F, 8.0F);
-            renderTarget_->FillRoundedRectangle(rounded, hoveredCard_ == static_cast<int>(index) ? hoveredCard.get() : card.get());
-            renderTarget_->DrawRoundedRectangle(rounded, border.get(), 1.0F);
+            const bool dropTarget = dropCard_ == static_cast<int>(index);
+            renderTarget_->FillRoundedRectangle(rounded, dropTarget || hoveredCard_ == static_cast<int>(index) ? hoveredCard.get() : card.get());
+            renderTarget_->DrawRoundedRectangle(rounded, dropTarget ? dropBorder.get() : border.get(), dropTarget ? 3.0F : 1.0F);
 
             const std::wstring title = (note.kind == NoteObjectKind::Directory ? L"[文件夹] " : L"[文件] ") + OriginalName(note.originalPath);
             const std::wstring path = note.originalPath.empty() ? L"原路径不可用" : note.originalPath;
@@ -488,12 +628,23 @@ void OrphanNotesWindow::Render()
                 summaryBounds,
                 text.get());
             renderTarget_->PopAxisAlignedClip();
+            const bool showDropHint = dropTarget && list.right - list.left > 420.0F;
             renderTarget_->DrawText(
                 time.c_str(),
                 static_cast<UINT32>(time.size()),
                 statusFormat_.get(),
-                D2D1::RectF(list.left + 14.0F, top + 124.0F, list.right - 14.0F, top + 146.0F),
+                D2D1::RectF(list.left + 14.0F, top + 124.0F, list.right - (showDropHint ? 150.0F : 14.0F), top + 146.0F),
                 secondaryText.get());
+            if (showDropHint)
+            {
+                const wchar_t* dropHint = L"松开以重绑";
+                renderTarget_->DrawText(
+                    dropHint,
+                    static_cast<UINT32>(wcslen(dropHint)),
+                    statusFormat_.get(),
+                    D2D1::RectF(list.right - 136.0F, top + 124.0F, list.right - 14.0F, top + 146.0F),
+                    dropBorder.get());
+            }
         }
     }
     renderTarget_->PopAxisAlignedClip();
@@ -762,6 +913,44 @@ int OrphanNotesWindow::CardAt(POINT point) const
     return index;
 }
 
+void OrphanNotesWindow::SetDropCard(int card)
+{
+    if (dropCard_ == card)
+    {
+        return;
+    }
+    dropCard_ = card;
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+void OrphanNotesWindow::DropFiles(const std::vector<std::wstring>& paths, POINT point)
+{
+    if (paths.empty())
+    {
+        statusError_ = true;
+        status_ = L"无法读取拖入的文件或文件夹";
+    }
+    else if (paths.size() != 1)
+    {
+        statusError_ = true;
+        status_ = L"每次只能拖入一个文件或文件夹";
+    }
+    else
+    {
+        const int card = CardAt(point);
+        if (card < 0)
+        {
+            statusError_ = true;
+            status_ = L"请将对象明确拖放到一张无主备注卡片上";
+        }
+        else
+        {
+            BeginRebind(results_[card].id, paths[0]);
+        }
+    }
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
 void OrphanNotesWindow::BeginRebind(std::int64_t noteId, const std::wstring& path)
 {
     if (binding_)
@@ -951,29 +1140,16 @@ LRESULT OrphanNotesWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lPa
         POINT point = {};
         DragQueryPoint(drop, &point);
         const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
-        if (count != 1)
+        std::vector<std::wstring> paths;
+        for (UINT index = 0; index < count; ++index)
         {
-            statusError_ = true;
-            status_ = L"每次只能拖入一个文件或文件夹";
-        }
-        else
-        {
-            const int card = CardAt(point);
-            if (card < 0)
-            {
-                statusError_ = true;
-                status_ = L"请将对象明确拖放到一张无主备注卡片上";
-            }
-            else
-            {
-                const UINT length = DragQueryFileW(drop, 0, nullptr, 0);
-                std::wstring path(static_cast<std::size_t>(length), L'\0');
-                DragQueryFileW(drop, 0, path.data(), length + 1);
-                BeginRebind(results_[card].id, path);
-            }
+            const UINT length = DragQueryFileW(drop, index, nullptr, 0);
+            std::wstring path(static_cast<std::size_t>(length), L'\0');
+            DragQueryFileW(drop, index, path.data(), length + 1);
+            paths.push_back(std::move(path));
         }
         DragFinish(drop);
-        InvalidateRect(window_, nullptr, FALSE);
+        DropFiles(paths, point);
         return 0;
     }
     case WM_CLOSE:
@@ -984,6 +1160,12 @@ LRESULT OrphanNotesWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lPa
         ShowWindow(window_, SW_HIDE);
         return 0;
     case WM_NCDESTROY:
+        if (dropTarget_ != nullptr)
+        {
+            RevokeDragDrop(window_);
+            dropTarget_->Release();
+            dropTarget_ = nullptr;
+        }
         searchEdit_ = nullptr;
         regexButton_ = nullptr;
         window_ = nullptr;

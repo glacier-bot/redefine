@@ -1,5 +1,6 @@
 #include "application.hpp"
 
+#include <ole2.h>
 #include <wil/resource.h>
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
@@ -12,7 +13,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
         return 0;
     }
 
-    const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const HRESULT comResult = OleInitialize(nullptr);
     if (FAILED(comResult))
     {
         MessageBoxW(nullptr, L"无法初始化 COM，原型将退出。", L"资源管理器备注原型", MB_ICONERROR);
@@ -27,6 +28,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     }
     const int result = initialized ? application.Run() : 1;
 
-    CoUninitialize();
+    OleUninitialize();
     return result;
 }

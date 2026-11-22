@@ -1,6 +1,7 @@
 #pragma once
 
 #include "explorer_tracker.hpp"
+#include "orphan_notes_window.hpp"
 #include "panel_window.hpp"
 
 #include <Windows.h>
@@ -49,6 +50,7 @@ private:
     HWND explorer_ = nullptr;
     ExplorerTracker tracker_;
     PanelWindow panel_;
+    OrphanNotesWindow orphanNotes_;
     std::array<HWINEVENTHOOK, 9> hooks_ = {};
     DWORD explorerProcessId_ = 0;
     ULONG shellNotificationId_ = 0;

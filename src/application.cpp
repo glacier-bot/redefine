@@ -16,6 +16,7 @@ constexpr UINT kCommandToggle = 1001;
 constexpr UINT kCommandSwitchSide = 1002;
 constexpr UINT kCommandExit = 1003;
 constexpr UINT kCommandTogglePreview = 1004;
+constexpr UINT kCommandOrphanNotes = 1005;
 }
 
 Application* Application::current_ = nullptr;
@@ -296,6 +297,7 @@ void Application::ShowTrayMenu()
     AppendMenuW(menu, MF_STRING, kCommandToggle, L"展开或收起备注框");
     AppendMenuW(menu, MF_STRING, kCommandSwitchSide, L"切换左右位置");
     AppendMenuW(menu, MF_STRING, kCommandTogglePreview, L"切换编辑或预览");
+    AppendMenuW(menu, MF_STRING, kCommandOrphanNotes, L"无主备注管理");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kCommandExit, L"退出");
 
@@ -328,6 +330,12 @@ void Application::ShowTrayMenu()
     case kCommandTogglePreview:
         panel_.TogglePreview();
         ScheduleRefresh(0);
+        break;
+    case kCommandOrphanNotes:
+        if (orphanNotes_.Create(instance_))
+        {
+            orphanNotes_.Show();
+        }
         break;
     case kCommandExit:
         PostQuitMessage(0);

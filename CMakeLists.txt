@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.30)
-project(redefine VERSION 0.5.0 LANGUAGES C CXX)
+project(redefine VERSION 0.6.0 LANGUAGES C CXX)
 
 include(cmake/dependencies.cmake)
 
@@ -10,6 +10,7 @@ add_executable(redefine WIN32
     src/markdown_preview.cpp
     src/notes_repository.cpp
     src/object_identity.cpp
+    src/orphan_notes_window.cpp
     src/panel_window.cpp
     src/redefine.ico
     src/redefine.manifest
@@ -29,6 +30,7 @@ target_compile_options(redefine PRIVATE /W4 /permissive- /Zc:__cplusplus)
 target_link_libraries(redefine PRIVATE
     WIL::WIL
     md4c::md4c
+    re2::re2
     unofficial::sqlite3::sqlite3
     d2d1
     dwrite

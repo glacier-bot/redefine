@@ -6,6 +6,7 @@
 #include <sqlite3.h>
 #include <wil/resource.h>
 
+#include <atomic>
 #include <ctime>
 #include <cstring>
 #include <memory>
@@ -17,6 +18,13 @@ namespace
 {
 using Database = std::unique_ptr<sqlite3, decltype(&sqlite3_close)>;
 using Statement = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
+
+std::atomic_uint64_t repositoryRevision{1};
+
+void NotifyRepositoryChanged()
+{
+    repositoryRevision.fetch_add(1, std::memory_order_release);
+}
 
 std::wstring FromUtf8(const char* text)
 {
@@ -362,6 +370,7 @@ bool OrphanBoundNotes(
         sqlite3_exec(database, "ROLLBACK;", nullptr, nullptr, nullptr);
         return false;
     }
+    NotifyRepositoryChanged();
     return true;
 }
 
@@ -501,6 +510,7 @@ bool RestoreMovedNotes(
         sqlite3_exec(database, "ROLLBACK;", nullptr, nullptr, nullptr);
         return false;
     }
+    NotifyRepositoryChanged();
     return true;
 }
 }
@@ -514,6 +524,10 @@ NotesRepository::NotesRepository()
         return;
     }
     databasePath_ = std::filesystem::path(localAppData.get()) / L"Redefine" / L"notes.db";
+}
+
+NotesRepository::NotesRepository(std::filesystem::path databasePath) : databasePath_(std::move(databasePath))
+{
 }
 
 std::optional<StoredNote> NotesRepository::Load(
@@ -761,4 +775,186 @@ bool NotesRepository::ApplyShellChange(
         directory,
         directory ? L"文件夹已删除" : L"文件已删除",
         error);
+}
+
+bool NotesRepository::VisitOrphanNotes(
+    const std::function<bool(const OrphanNote&)>& visitor,
+    std::wstring& error) const
+{
+    error.clear();
+    if (!initializationError_.empty())
+    {
+        error = initializationError_;
+        return false;
+    }
+    Database database = OpenDatabase(databasePath_, error);
+    if (!database)
+    {
+        return false;
+    }
+
+    Statement query(nullptr, sqlite3_finalize);
+    if (!Prepare(
+            database.get(),
+            "SELECT note_id, markdown, original_path, object_kind, orphan_since FROM notes "
+            "WHERE status = 'Orphan' ORDER BY orphan_since DESC, note_id DESC;",
+            query,
+            error))
+    {
+        return false;
+    }
+
+    int result = SQLITE_ERROR;
+    while ((result = sqlite3_step(query.get())) == SQLITE_ROW)
+    {
+        OrphanNote note;
+        note.id = sqlite3_column_int64(query.get(), 0);
+        note.markdown = FromUtf8(reinterpret_cast<const char*>(sqlite3_column_text(query.get(), 1)));
+        note.originalPath = FromUtf8(reinterpret_cast<const char*>(sqlite3_column_text(query.get(), 2)));
+        note.kind = sqlite3_column_int(query.get(), 3) == 1 ? NoteObjectKind::Directory : NoteObjectKind::File;
+        note.orphanSince = sqlite3_column_int64(query.get(), 4);
+        if (!visitor(note))
+        {
+            return true;
+        }
+    }
+    if (result != SQLITE_DONE)
+    {
+        error = L"无法读取无主备注";
+        return false;
+    }
+    return true;
+}
+
+bool NotesRepository::RebindOrphan(std::int64_t noteId, const std::wstring& path, std::wstring& error) const
+{
+    error.clear();
+    if (!initializationError_.empty())
+    {
+        error = initializationError_;
+        return false;
+    }
+
+    const auto identity = ReadObjectIdentity(path, error);
+    if (!identity)
+    {
+        return false;
+    }
+
+    Database database = OpenDatabase(databasePath_, error);
+    if (!database)
+    {
+        return false;
+    }
+    if (sqlite3_exec(database.get(), "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr) != SQLITE_OK)
+    {
+        error = L"无法开始重新绑定事务";
+        return false;
+    }
+    const auto rollback = [&database]() { sqlite3_exec(database.get(), "ROLLBACK;", nullptr, nullptr, nullptr); };
+
+    Statement noteQuery(nullptr, sqlite3_finalize);
+    Statement bindingQuery(nullptr, sqlite3_finalize);
+    Statement update(nullptr, sqlite3_finalize);
+    Statement insert(nullptr, sqlite3_finalize);
+    const bool prepared = Prepare(
+        database.get(),
+        "SELECT object_kind, status FROM notes WHERE note_id = ?1;",
+        noteQuery,
+        error) && Prepare(
+            database.get(),
+            "SELECT note_id FROM object_bindings WHERE volume_id = ?1 AND file_id = ?2;",
+            bindingQuery,
+            error) && Prepare(
+            database.get(),
+            "UPDATE notes SET status = 'Bound', orphan_reason = NULL, orphan_since = NULL, "
+            "original_path = NULL, original_volume_id = NULL, original_file_id = NULL, updated_at = ?2 "
+            "WHERE note_id = ?1 AND status = 'Orphan' AND object_kind = ?3;",
+            update,
+            error) && Prepare(
+            database.get(),
+            "INSERT INTO object_bindings(note_id, volume_id, file_id, last_path, bound_at, link_count) "
+            "VALUES(?1, ?2, ?3, ?4, ?5, ?6);",
+            insert,
+            error);
+    if (!prepared)
+    {
+        rollback();
+        return false;
+    }
+
+    sqlite3_bind_int64(noteQuery.get(), 1, noteId);
+    if (sqlite3_step(noteQuery.get()) != SQLITE_ROW)
+    {
+        error = L"无主备注已不存在";
+        rollback();
+        return false;
+    }
+    const NoteObjectKind expectedKind = sqlite3_column_int(noteQuery.get(), 0) == 1
+        ? NoteObjectKind::Directory
+        : NoteObjectKind::File;
+    const std::string status = reinterpret_cast<const char*>(sqlite3_column_text(noteQuery.get(), 1));
+    if (status != "Orphan")
+    {
+        error = L"该备注已不再是无主状态，请刷新后重试";
+        rollback();
+        return false;
+    }
+    if (identity->kind != expectedKind)
+    {
+        error = L"拖入对象的类型与原备注不一致，文件和文件夹不能互相绑定";
+        rollback();
+        return false;
+    }
+
+    BindIdentity(bindingQuery.get(), 1, *identity);
+    const int bindingResult = sqlite3_step(bindingQuery.get());
+    if (bindingResult == SQLITE_ROW)
+    {
+        error = L"该对象已经绑定了其他备注，不能覆盖或抢占";
+        rollback();
+        return false;
+    }
+    if (bindingResult != SQLITE_DONE)
+    {
+        error = L"无法检查拖入对象的绑定状态";
+        rollback();
+        return false;
+    }
+
+    const std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
+    const std::string utf8Path = ToUtf8(path);
+    sqlite3_bind_int64(update.get(), 1, noteId);
+    sqlite3_bind_int64(update.get(), 2, now);
+    sqlite3_bind_int(update.get(), 3, expectedKind == NoteObjectKind::Directory ? 1 : 0);
+    sqlite3_bind_int64(insert.get(), 1, noteId);
+    BindIdentity(insert.get(), 2, *identity);
+    sqlite3_bind_text(insert.get(), 4, utf8Path.c_str(), static_cast<int>(utf8Path.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_int64(insert.get(), 5, now);
+    sqlite3_bind_int(insert.get(), 6, static_cast<int>(identity->linkCount));
+    if (sqlite3_step(update.get()) != SQLITE_DONE || sqlite3_changes(database.get()) != 1)
+    {
+        error = L"备注状态已变化，未能完成重新绑定";
+        rollback();
+        return false;
+    }
+    if (sqlite3_step(insert.get()) != SQLITE_DONE)
+    {
+        error = L"无法写入新的对象绑定，备注仍保持无主状态";
+        rollback();
+        return false;
+    }
+    if (sqlite3_exec(database.get(), "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK)
+    {
+        error = L"无法提交重新绑定事务";
+        rollback();
+        return false;
+    }
+    NotifyRepositoryChanged();
+    return true;
+}
+
+std::uint64_t NotesRepository::Revision() const
+{
+    return repositoryRevision.load(std::memory_order_acquire);
 }

@@ -17,6 +17,7 @@ constexpr UINT kCommandSwitchSide = 1002;
 constexpr UINT kCommandExit = 1003;
 constexpr UINT kCommandTogglePreview = 1004;
 constexpr UINT kCommandOrphanNotes = 1005;
+constexpr UINT kCommandUnbind = 1006;
 }
 
 Application* Application::current_ = nullptr;
@@ -59,6 +60,7 @@ bool Application::Initialize()
     {
         return false;
     }
+    panel_.SetOrphanNotesHandler([this]() { ShowOrphanNotes(); });
     current_ = this;
     if (!RegisterShellNotifications())
     {
@@ -287,6 +289,14 @@ void Application::RemoveTrayIcon()
     trayIconAdded_ = false;
 }
 
+void Application::ShowOrphanNotes()
+{
+    if (orphanNotes_.Create(instance_))
+    {
+        orphanNotes_.Show();
+    }
+}
+
 void Application::ShowTrayMenu()
 {
     HMENU menu = CreatePopupMenu();
@@ -298,6 +308,11 @@ void Application::ShowTrayMenu()
     AppendMenuW(menu, MF_STRING, kCommandSwitchSide, L"切换左右位置");
     AppendMenuW(menu, MF_STRING, kCommandTogglePreview, L"切换编辑或预览");
     AppendMenuW(menu, MF_STRING, kCommandOrphanNotes, L"无主备注管理");
+    AppendMenuW(
+        menu,
+        MF_STRING | (panel_.CanUnbindCurrentNote() ? MF_ENABLED : MF_GRAYED),
+        kCommandUnbind,
+        L"解除当前备注绑定");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kCommandExit, L"退出");
 
@@ -332,10 +347,10 @@ void Application::ShowTrayMenu()
         ScheduleRefresh(0);
         break;
     case kCommandOrphanNotes:
-        if (orphanNotes_.Create(instance_))
-        {
-            orphanNotes_.Show();
-        }
+        ShowOrphanNotes();
+        break;
+    case kCommandUnbind:
+        panel_.UnbindCurrentNote();
         break;
     case kCommandExit:
         PostQuitMessage(0);

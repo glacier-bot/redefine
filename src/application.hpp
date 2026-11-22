@@ -41,6 +41,7 @@ private:
     void AddTrayIcon();
     void RemoveTrayIcon();
     void ShowTrayMenu();
+    void ShowOrphanNotes();
     void Shutdown();
 
     static Application* current_;

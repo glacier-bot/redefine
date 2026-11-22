@@ -38,6 +38,10 @@ public:
         const std::wstring& path,
         const std::wstring& markdown,
         std::wstring& error) const;
+    bool Unbind(
+        const ObjectIdentity& identity,
+        const std::wstring& path,
+        std::wstring& error) const;
     bool ApplyShellChange(
         LONG event,
         const std::wstring& path,

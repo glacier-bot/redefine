@@ -697,6 +697,32 @@ bool NotesRepository::Save(
     return true;
 }
 
+bool NotesRepository::Unbind(
+    const ObjectIdentity& identity,
+    const std::wstring& path,
+    std::wstring& error) const
+{
+    error.clear();
+    if (!initializationError_.empty())
+    {
+        error = initializationError_;
+        return false;
+    }
+    Database database = OpenDatabase(databasePath_, error);
+    if (!database)
+    {
+        return false;
+    }
+    return OrphanBoundNotes(
+        database.get(),
+        path,
+        identity.kind == NoteObjectKind::Directory,
+        L"用户主动解除绑定",
+        error,
+        false,
+        &identity);
+}
+
 bool NotesRepository::ApplyShellChange(
     LONG event,
     const std::wstring& path,

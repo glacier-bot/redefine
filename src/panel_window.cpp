@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <memory>
 #include <optional>
+#include <utility>
 
 namespace
 {
@@ -60,6 +61,10 @@ std::wstring TargetName(const std::wstring& path)
     const wchar_t* name = PathFindFileNameW(path.c_str());
     return name == nullptr || *name == L'\0' ? path : name;
 }
+}
+
+PanelWindow::PanelWindow(std::filesystem::path databasePath) : repository_(std::move(databasePath))
+{
 }
 
 PanelWindow::~PanelWindow()
@@ -201,6 +206,40 @@ void PanelWindow::TogglePreview()
     {
         SetFocus(editor_);
     }
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+void PanelWindow::SetOrphanNotesHandler(std::function<void()> handler)
+{
+    orphanNotesHandler_ = std::move(handler);
+}
+
+bool PanelWindow::CanUnbindCurrentNote() const
+{
+    return window_ != nullptr && IsWindowVisible(window_) && targetValid_ && noteBound_ && !unbinding_;
+}
+
+void PanelWindow::UnbindCurrentNote()
+{
+    if (!CanUnbindCurrentNote())
+    {
+        return;
+    }
+    QueuePendingSave();
+    unbinding_ = true;
+    EnableWindow(editor_, FALSE);
+    noteStatus_ = L"正在解除绑定…";
+
+    SaveRequest request;
+    request.generation = generation_;
+    request.identity = targetIdentity_;
+    request.path = targetPath_;
+    request.unbind = true;
+    {
+        std::lock_guard lock(saveMutex_);
+        saveQueue_.push_back(std::move(request));
+    }
+    saveCondition_.notify_one();
     InvalidateRect(window_, nullptr, FALSE);
 }
 
@@ -357,6 +396,7 @@ void PanelWindow::RefreshTarget()
 
     QueuePendingSave();
     ++generation_;
+    unbinding_ = false;
     targetPath_ = path;
     UpdateBindingState(false);
     targetValid_ = identity.has_value();
@@ -475,10 +515,18 @@ void PanelWindow::SaveWorker()
         }
 
         std::wstring error;
-        repository_.Save(request.identity, request.path, request.markdown, error);
+        if (request.unbind)
+        {
+            repository_.Unbind(request.identity, request.path, error);
+        }
+        else
+        {
+            repository_.Save(request.identity, request.path, request.markdown, error);
+        }
         auto result = std::make_unique<SaveResult>();
         result->generation = request.generation;
         result->error = std::move(error);
+        result->unbind = request.unbind;
         if (PostMessageW(window_, kSaveCompletedMessage, 0, reinterpret_cast<LPARAM>(result.get())))
         {
             result.release();
@@ -655,6 +703,8 @@ void PanelWindow::Render()
         previewButton_ = D2D1::RectF(width - 204.0F, 8.0F, width - 150.0F, 34.0F);
         collapseButton_ = D2D1::RectF(width - 76.0F, 8.0F, width - 10.0F, 34.0F);
         sideButton_ = D2D1::RectF(width - 142.0F, 8.0F, width - 84.0F, 34.0F);
+        orphanNotesButton_ = D2D1::RectF(width - 72.0F, height - 38.0F, width - 40.0F, height - 8.0F);
+        unbindButton_ = D2D1::RectF(width - 38.0F, height - 38.0F, width - 8.0F, height - 8.0F);
         if (controlsVisible)
         {
             const auto drawButton = [this](const D2D1_RECT_F& rectangle, const wchar_t* label, UINT32 length, ID2D1Brush* fill, ID2D1Brush* foreground) {
@@ -664,6 +714,51 @@ void PanelWindow::Render()
             drawButton(previewButton_, previewMode_ ? L"编辑" : L"预览", 2, accent.get(), text.get());
             drawButton(sideButton_, L"换侧", 2, accent.get(), text.get());
             drawButton(collapseButton_, L"收起", 2, accent.get(), text.get());
+
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(orphanNotesButton_, 6.0F, 6.0F), accent.get());
+            const auto managerIcon = D2D1::RectF(
+                orphanNotesButton_.left + 8.0F,
+                orphanNotesButton_.top + 6.0F,
+                orphanNotesButton_.right - 8.0F,
+                orphanNotesButton_.bottom - 6.0F);
+            renderTarget_->DrawRectangle(managerIcon, text.get(), 1.2F);
+            renderTarget_->DrawLine(
+                D2D1::Point2F(managerIcon.left, managerIcon.top + 5.0F),
+                D2D1::Point2F(managerIcon.right, managerIcon.top + 5.0F),
+                text.get(),
+                1.2F);
+            renderTarget_->DrawLine(
+                D2D1::Point2F(managerIcon.left + 3.0F, managerIcon.top + 10.0F),
+                D2D1::Point2F(managerIcon.right - 3.0F, managerIcon.top + 10.0F),
+                text.get(),
+                1.2F);
+            renderTarget_->DrawLine(
+                D2D1::Point2F(managerIcon.left + 3.0F, managerIcon.top + 14.0F),
+                D2D1::Point2F(managerIcon.right - 6.0F, managerIcon.top + 14.0F),
+                text.get(),
+                1.2F);
+
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(unbindButton_, 6.0F, 6.0F), accent.get());
+            auto* unbindIconBrush = CanUnbindCurrentNote() ? text.get() : secondaryText.get();
+            renderTarget_->DrawRoundedRectangle(
+                D2D1::RoundedRect(
+                    D2D1::RectF(unbindButton_.left + 5.0F, unbindButton_.top + 6.0F, unbindButton_.left + 16.0F, unbindButton_.top + 13.0F),
+                    3.0F,
+                    3.0F),
+                unbindIconBrush,
+                1.3F);
+            renderTarget_->DrawRoundedRectangle(
+                D2D1::RoundedRect(
+                    D2D1::RectF(unbindButton_.right - 16.0F, unbindButton_.bottom - 13.0F, unbindButton_.right - 5.0F, unbindButton_.bottom - 6.0F),
+                    3.0F,
+                    3.0F),
+                unbindIconBrush,
+                1.3F);
+            renderTarget_->DrawLine(
+                D2D1::Point2F(unbindButton_.left + 8.0F, unbindButton_.bottom - 5.0F),
+                D2D1::Point2F(unbindButton_.right - 8.0F, unbindButton_.top + 5.0F),
+                unbindIconBrush,
+                1.5F);
         }
 
         if (previewMode_)
@@ -712,7 +807,7 @@ void PanelWindow::Render()
             bindingText_.c_str(),
             static_cast<UINT32>(bindingText_.size()),
             bodyFormat_.get(),
-            D2D1::RectF(14.0F, height - 27.0F, width - 14.0F, height - 6.0F),
+            D2D1::RectF(14.0F, height - 27.0F, width - (controlsVisible ? 82.0F : 14.0F), height - 6.0F),
             binding.get());
     }
 
@@ -797,6 +892,17 @@ LRESULT PanelWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         {
             ToggleDockSide();
         }
+        else if (controlsVisible && Contains(orphanNotesButton_, x, y))
+        {
+            if (orphanNotesHandler_)
+            {
+                orphanNotesHandler_();
+            }
+        }
+        else if (controlsVisible && Contains(unbindButton_, x, y))
+        {
+            UnbindCurrentNote();
+        }
         return 0;
     }
     case WM_MOUSEWHEEL:
@@ -827,10 +933,37 @@ LRESULT PanelWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         std::unique_ptr<SaveResult> result(reinterpret_cast<SaveResult*>(lParam));
         if (result && result->generation == generation_)
         {
-            noteStatus_ = result->error.empty() ? L"已自动保存" : result->error;
-            if (result->error.empty())
+            if (result->unbind)
             {
-                UpdateBindingState(true);
+                unbinding_ = false;
+                EnableWindow(editor_, targetValid_);
+                if (result->error.empty())
+                {
+                    UpdateBindingState(false);
+                    loadingText_ = true;
+                    SetWindowTextW(editor_, L"");
+                    loadingText_ = false;
+                    SendMessageW(editor_, EM_SETMODIFY, FALSE, 0);
+                    preview_.SetMarkdown(L"");
+                    previewScroll_ = 0.0F;
+                    previewContentHeight_ = 0.0F;
+                    noteStatus_ = L"备注已解除绑定，并保留在无主备注中";
+                }
+                else
+                {
+                    noteStatus_ = result->error;
+                }
+            }
+            else
+            {
+                if (!unbinding_)
+                {
+                    noteStatus_ = result->error.empty() ? L"已自动保存" : result->error;
+                }
+                if (result->error.empty())
+                {
+                    UpdateBindingState(true);
+                }
             }
             InvalidateRect(window_, nullptr, FALSE);
         }

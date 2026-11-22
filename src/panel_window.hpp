@@ -12,6 +12,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -20,6 +21,7 @@ class PanelWindow
 {
 public:
     PanelWindow() = default;
+    explicit PanelWindow(std::filesystem::path databasePath);
     ~PanelWindow();
 
     bool Create(HINSTANCE instance);
@@ -28,6 +30,9 @@ public:
     void ToggleCollapsed();
     void ToggleDockSide();
     void TogglePreview();
+    void SetOrphanNotesHandler(std::function<void()> handler);
+    void UnbindCurrentNote();
+    bool CanUnbindCurrentNote() const;
     void HandleShellChange(LONG event, const std::wstring& path, const std::wstring& newPath);
 
     HWND Hwnd() const;
@@ -42,12 +47,14 @@ private:
         std::wstring newPath;
         LONG shellEvent = 0;
         bool shellChange = false;
+        bool unbind = false;
     };
 
     struct SaveResult
     {
         std::uint64_t generation = 0;
         std::wstring error;
+        bool unbind = false;
     };
 
     static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
@@ -74,6 +81,7 @@ private:
     ExplorerSnapshot snapshot_;
     NotesRepository repository_;
     MarkdownPreview preview_;
+    std::function<void()> orphanNotesHandler_;
     ObjectIdentity targetIdentity_;
     std::wstring targetPath_;
     std::wstring noteStatus_;
@@ -86,11 +94,14 @@ private:
     bool hovering_ = false;
     bool loadingText_ = false;
     bool previewMode_ = false;
+    bool unbinding_ = false;
     float previewScroll_ = 0.0F;
     float previewContentHeight_ = 0.0F;
     D2D1_RECT_F previewButton_ = {};
     D2D1_RECT_F collapseButton_ = {};
     D2D1_RECT_F sideButton_ = {};
+    D2D1_RECT_F orphanNotesButton_ = {};
+    D2D1_RECT_F unbindButton_ = {};
 
     std::mutex saveMutex_;
     std::condition_variable saveCondition_;

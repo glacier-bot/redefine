@@ -30,7 +30,9 @@ private:
 
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
     void OnWinEvent(DWORD event, HWND window);
-    void AddHook(DWORD minimumEvent, DWORD maximumEvent);
+    void AddHook(DWORD minimumEvent, DWORD maximumEvent, DWORD processId = 0);
+    void BindExplorerHooks(HWND explorer);
+    void ClearExplorerHooks();
     void ScheduleRefresh(UINT delay = 40);
     void Refresh();
     void AddTrayIcon();
@@ -46,6 +48,7 @@ private:
     ExplorerTracker tracker_;
     PanelWindow panel_;
     std::array<HWINEVENTHOOK, 9> hooks_ = {};
+    DWORD explorerProcessId_ = 0;
     bool trayIconAdded_ = false;
     bool shuttingDown_ = false;
 };

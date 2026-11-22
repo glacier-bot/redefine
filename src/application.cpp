@@ -57,14 +57,6 @@ bool Application::Initialize()
 
     AddTrayIcon();
     AddHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND);
-    AddHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE);
-    AddHook(EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE);
-    AddHook(EVENT_OBJECT_VALUECHANGE, EVENT_OBJECT_VALUECHANGE);
-    AddHook(EVENT_OBJECT_SELECTION, EVENT_OBJECT_SELECTION);
-    AddHook(EVENT_OBJECT_SELECTIONWITHIN, EVENT_OBJECT_SELECTIONWITHIN);
-    AddHook(EVENT_OBJECT_HIDE, EVENT_OBJECT_HIDE);
-    AddHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY);
-    AddHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND);
     Refresh();
     return true;
 }
@@ -80,9 +72,10 @@ int Application::Run()
     return static_cast<int>(message.wParam);
 }
 
-void Application::AddHook(DWORD minimumEvent, DWORD maximumEvent)
+void Application::AddHook(DWORD minimumEvent, DWORD maximumEvent, DWORD processId)
 {
-    const auto available = std::find_if(hooks_.begin(), hooks_.end(), [](HWINEVENTHOOK hook) { return hook == nullptr; });
+    const auto first = processId == 0 ? hooks_.begin() : hooks_.begin() + 1;
+    const auto available = std::find_if(first, hooks_.end(), [](HWINEVENTHOOK hook) { return hook == nullptr; });
     if (available != hooks_.end())
     {
         *available = SetWinEventHook(
@@ -90,10 +83,44 @@ void Application::AddHook(DWORD minimumEvent, DWORD maximumEvent)
             maximumEvent,
             nullptr,
             WinEventProc,
-            0,
+            processId,
             0,
             WINEVENT_OUTOFCONTEXT);
     }
+}
+
+void Application::BindExplorerHooks(HWND explorer)
+{
+    DWORD processId = 0;
+    GetWindowThreadProcessId(explorer, &processId);
+    if (processId == 0 || processId == explorerProcessId_)
+    {
+        return;
+    }
+
+    ClearExplorerHooks();
+    explorerProcessId_ = processId;
+    AddHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, processId);
+    AddHook(EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE, processId);
+    AddHook(EVENT_OBJECT_VALUECHANGE, EVENT_OBJECT_VALUECHANGE, processId);
+    AddHook(EVENT_OBJECT_SELECTION, EVENT_OBJECT_SELECTION, processId);
+    AddHook(EVENT_OBJECT_SELECTIONWITHIN, EVENT_OBJECT_SELECTIONWITHIN, processId);
+    AddHook(EVENT_OBJECT_HIDE, EVENT_OBJECT_HIDE, processId);
+    AddHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY, processId);
+    AddHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND, processId);
+}
+
+void Application::ClearExplorerHooks()
+{
+    for (auto hook = hooks_.begin() + 1; hook != hooks_.end(); ++hook)
+    {
+        if (*hook != nullptr)
+        {
+            UnhookWinEvent(*hook);
+            *hook = nullptr;
+        }
+    }
+    explorerProcessId_ = 0;
 }
 
 void CALLBACK Application::WinEventProc(
@@ -118,6 +145,7 @@ void Application::OnWinEvent(DWORD event, HWND window)
     {
         KillTimer(messageWindow_, kRefreshTimer);
         explorer_ = nullptr;
+        ClearExplorerHooks();
         panel_.Hide();
         return;
     }
@@ -153,11 +181,13 @@ void Application::Refresh()
     if (!ExplorerTracker::IsFileExplorerWindow(foreground))
     {
         explorer_ = nullptr;
+        ClearExplorerHooks();
         panel_.Hide();
         return;
     }
 
     explorer_ = foreground;
+    BindExplorerHooks(explorer_);
     panel_.ShowFor(explorer_, tracker_.Query(explorer_));
 }
 

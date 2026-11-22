@@ -27,6 +27,31 @@ std::wstring EditorText(HWND editor)
     GetWindowTextW(editor, text.data(), length + 1);
     return text;
 }
+
+struct WindowSearch
+{
+    const wchar_t* className = nullptr;
+    HWND result = nullptr;
+};
+
+BOOL CALLBACK FindDescendantProc(HWND child, LPARAM parameter)
+{
+    auto& search = *reinterpret_cast<WindowSearch*>(parameter);
+    wchar_t className[64] = {};
+    if (GetClassNameW(child, className, static_cast<int>(std::size(className))) > 0 && _wcsicmp(className, search.className) == 0)
+    {
+        search.result = child;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+HWND FindDescendantWindow(HWND parent, const wchar_t* className)
+{
+    WindowSearch search{className};
+    EnumChildWindows(parent, FindDescendantProc, reinterpret_cast<LPARAM>(&search));
+    return search.result;
+}
 }
 
 PanelWindow::~PanelWindow()
@@ -108,7 +133,7 @@ bool PanelWindow::Create(HINSTANCE instance)
     CHARFORMAT2W format = {};
     format.cbSize = sizeof(format);
     format.dwMask = CFM_FACE | CFM_SIZE | CFM_CHARSET | CFM_COLOR;
-    format.yHeight = 280;
+    format.yHeight = 240;
     format.bCharSet = DEFAULT_CHARSET;
     format.crTextColor = RGB(32, 36, 42);
     wcscpy_s(format.szFaceName, L"Microsoft YaHei UI");
@@ -203,8 +228,34 @@ void PanelWindow::ShowFor(HWND explorer, const ExplorerSnapshot& snapshot)
     }
 
     const UINT dpi = GetDpiForWindow(explorer);
-    const int margin = MulDiv(12, dpi, 96);
-    const int collapsedSize = MulDiv(54, dpi, 96);
+    int contentTop = std::min(MulDiv(140, dpi, 96), clientHeight / 3);
+    int contentBottom = clientHeight;
+    const wchar_t* viewClasses[] = {L"SHELLDLL_DefView", L"DUIViewWndClassName"};
+    for (const wchar_t* className : viewClasses)
+    {
+        const HWND view = FindDescendantWindow(explorer, className);
+        RECT viewBounds = {};
+        if (view != nullptr && GetWindowRect(view, &viewBounds))
+        {
+            const int top = static_cast<int>(viewBounds.top) - origin.y;
+            const int bottom = static_cast<int>(viewBounds.bottom) - origin.y;
+            if (top >= 0 && bottom > top && top < clientHeight)
+            {
+                contentTop = top;
+                contentBottom = std::min(bottom, clientHeight);
+                break;
+            }
+        }
+    }
+    const int contentHeight = contentBottom - contentTop;
+    if (contentHeight < 120)
+    {
+        Hide();
+        return;
+    }
+
+    const int margin = MulDiv(10, dpi, 96);
+    const int collapsedSize = MulDiv(44, dpi, 96);
 
     int width = collapsedSize;
     int height = collapsedSize;
@@ -213,16 +264,16 @@ void PanelWindow::ShowFor(HWND explorer, const ExplorerSnapshot& snapshot)
     if (collapsed_)
     {
         x = dockRight_ ? origin.x + clientWidth - width - margin : origin.x + margin;
-        y = origin.y + (clientHeight - height) / 2;
+        y = origin.y + contentTop + (contentHeight - height) / 2;
     }
     else
     {
         width = std::min(MulDiv(350, dpi, 96), clientWidth * 2 / 5);
         width = std::max(width, MulDiv(260, dpi, 96));
         width = std::min(width, clientWidth - margin * 2);
-        height = clientHeight - margin * 2;
+        height = contentHeight - margin * 2;
         x = dockRight_ ? origin.x + clientWidth - width - margin : origin.x + margin;
-        y = origin.y + margin;
+        y = origin.y + contentTop + margin;
     }
 
     SetWindowPos(
@@ -422,8 +473,8 @@ D2D1_RECT_F PanelWindow::ContentBounds() const
     RECT client = {};
     GetClientRect(window_, &client);
     const UINT dpi = GetDpiForWindow(window_);
-    const int margin = MulDiv(16, dpi, 96);
-    const int top = MulDiv(180, dpi, 96);
+    const int margin = MulDiv(14, dpi, 96);
+    const int top = MulDiv(140, dpi, 96);
     return D2D1::RectF(
         static_cast<float>(margin),
         static_cast<float>(top),
@@ -495,10 +546,10 @@ bool PanelWindow::EnsureResources()
             L"zh-CN",
             format);
     };
-    if (FAILED(createFormat(20.0F, DWRITE_FONT_WEIGHT_SEMI_BOLD, titleFormat_.put())) ||
-        FAILED(createFormat(13.5F, DWRITE_FONT_WEIGHT_NORMAL, bodyFormat_.put())) ||
-        FAILED(createFormat(12.5F, DWRITE_FONT_WEIGHT_NORMAL, statusFormat_.put())) ||
-        FAILED(createFormat(13.0F, DWRITE_FONT_WEIGHT_NORMAL, buttonFormat_.put())))
+    if (FAILED(createFormat(17.0F, DWRITE_FONT_WEIGHT_SEMI_BOLD, titleFormat_.put())) ||
+        FAILED(createFormat(11.5F, DWRITE_FONT_WEIGHT_NORMAL, bodyFormat_.put())) ||
+        FAILED(createFormat(11.0F, DWRITE_FONT_WEIGHT_NORMAL, statusFormat_.put())) ||
+        FAILED(createFormat(11.0F, DWRITE_FONT_WEIGHT_NORMAL, buttonFormat_.put())))
     {
         return false;
     }
@@ -551,31 +602,31 @@ void PanelWindow::Render()
     else
     {
         const bool controlsVisible = hovering_ || GetForegroundWindow() == window_;
-        const float titleRight = controlsVisible ? width - 252.0F : width - 16.0F;
+        const float titleRight = controlsVisible && width >= 310.0F ? width - 212.0F : controlsVisible ? 14.0F : width - 14.0F;
         const wchar_t* title = !targetValid_ ? L"对象备注" : targetIdentity_.kind == NoteObjectKind::Directory ? L"文件夹备注" : L"文件备注";
         renderTarget_->DrawText(
             title,
             static_cast<UINT32>(wcslen(title)),
             titleFormat_.get(),
-            D2D1::RectF(16.0F, 12.0F, std::max(16.0F, titleRight), 46.0F),
+            D2D1::RectF(14.0F, 8.0F, std::max(14.0F, titleRight), 36.0F),
             text.get());
 
         renderTarget_->DrawText(
             targetDescription_.c_str(),
             static_cast<UINT32>(targetDescription_.size()),
             bodyFormat_.get(),
-            D2D1::RectF(16.0F, 52.0F, width - 16.0F, 134.0F),
+            D2D1::RectF(14.0F, 40.0F, width - 14.0F, 106.0F),
             text.get());
         renderTarget_->DrawText(
             noteStatus_.c_str(),
             static_cast<UINT32>(noteStatus_.size()),
             statusFormat_.get(),
-            D2D1::RectF(16.0F, 138.0F, width - 16.0F, 172.0F),
+            D2D1::RectF(14.0F, 110.0F, width - 14.0F, 134.0F),
             secondaryText.get());
 
-        previewButton_ = D2D1::RectF(width - 244.0F, 12.0F, width - 182.0F, 42.0F);
-        collapseButton_ = D2D1::RectF(width - 88.0F, 12.0F, width - 12.0F, 42.0F);
-        sideButton_ = D2D1::RectF(width - 174.0F, 12.0F, width - 96.0F, 42.0F);
+        previewButton_ = D2D1::RectF(width - 204.0F, 8.0F, width - 150.0F, 34.0F);
+        collapseButton_ = D2D1::RectF(width - 76.0F, 8.0F, width - 10.0F, 34.0F);
+        sideButton_ = D2D1::RectF(width - 142.0F, 8.0F, width - 84.0F, 34.0F);
         if (controlsVisible)
         {
             const auto drawButton = [this](const D2D1_RECT_F& rectangle, const wchar_t* label, UINT32 length, ID2D1Brush* fill, ID2D1Brush* foreground) {

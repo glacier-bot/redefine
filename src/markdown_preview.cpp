@@ -348,13 +348,13 @@ struct MarkdownPreview::Implementation
                 continue;
             }
 
-            float fontSize = 14.5F;
+            float fontSize = 12.5F;
             DWRITE_FONT_WEIGHT weight = DWRITE_FONT_WEIGHT_NORMAL;
             const wchar_t* fontFamily = L"Microsoft YaHei UI";
-            float spacing = 10.0F;
+            float spacing = 8.0F;
             if (block.kind == BlockKind::Heading)
             {
-                constexpr float sizes[] = {26.0F, 23.0F, 20.0F, 18.0F, 16.5F, 15.0F};
+                constexpr float sizes[] = {22.0F, 19.0F, 17.0F, 15.5F, 14.0F, 12.5F};
                 const unsigned level = std::clamp(block.headingLevel, 1u, 6u);
                 fontSize = sizes[level - 1];
                 weight = DWRITE_FONT_WEIGHT_SEMI_BOLD;
@@ -366,9 +366,9 @@ struct MarkdownPreview::Implementation
             }
             else if (block.kind == BlockKind::Code)
             {
-                fontSize = 13.5F;
+                fontSize = 11.5F;
                 fontFamily = L"Consolas";
-                spacing = 12.0F;
+                spacing = 10.0F;
             }
 
             wil::com_ptr<IDWriteTextFormat> format;

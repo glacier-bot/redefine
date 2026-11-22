@@ -28,6 +28,7 @@ public:
     void ToggleCollapsed();
     void ToggleDockSide();
     void TogglePreview();
+    void HandleShellChange(LONG event, const std::wstring& path, const std::wstring& newPath);
 
     HWND Hwnd() const;
 
@@ -38,6 +39,9 @@ private:
         ObjectIdentity identity;
         std::wstring path;
         std::wstring markdown;
+        std::wstring newPath;
+        LONG shellEvent = 0;
+        bool shellChange = false;
     };
 
     struct SaveResult

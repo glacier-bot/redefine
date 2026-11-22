@@ -1,11 +1,14 @@
 #include "application.hpp"
 
+#include <ShlObj.h>
+
 #include <algorithm>
 
 namespace
 {
 constexpr wchar_t kMessageClassName[] = L"RedefineMessageWindow";
 constexpr UINT kTrayMessage = WM_APP + 1;
+constexpr UINT kShellChangeMessage = WM_APP + 2;
 constexpr UINT_PTR kRefreshTimer = 1;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT kCommandToggle = 1001;
@@ -55,6 +58,10 @@ bool Application::Initialize()
         return false;
     }
     current_ = this;
+    if (!RegisterShellNotifications())
+    {
+        return false;
+    }
 
     AddTrayIcon();
     AddHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND);
@@ -122,6 +129,65 @@ void Application::ClearExplorerHooks()
         }
     }
     explorerProcessId_ = 0;
+}
+
+bool Application::RegisterShellNotifications()
+{
+    SHChangeNotifyEntry entry = {};
+    entry.pidl = nullptr;
+    entry.fRecursive = TRUE;
+    shellNotificationId_ = SHChangeNotifyRegister(
+        messageWindow_,
+        SHCNRF_InterruptLevel | SHCNRF_ShellLevel | SHCNRF_NewDelivery,
+        SHCNE_RENAMEITEM | SHCNE_RENAMEFOLDER | SHCNE_DELETE | SHCNE_RMDIR,
+        kShellChangeMessage,
+        1,
+        &entry);
+    return shellNotificationId_ != 0;
+}
+
+void Application::OnShellNotification(WPARAM wParam, LPARAM lParam)
+{
+    PIDLIST_ABSOLUTE* identifiers = nullptr;
+    LONG event = 0;
+    const HANDLE lock = SHChangeNotification_Lock(
+        reinterpret_cast<HANDLE>(wParam),
+        static_cast<DWORD>(lParam),
+        &identifiers,
+        &event);
+    if (lock == nullptr)
+    {
+        return;
+    }
+
+    std::wstring path;
+    std::wstring newPath;
+    wchar_t pathBuffer[MAX_PATH] = {};
+    if (identifiers != nullptr && identifiers[0] != nullptr && SHGetPathFromIDListW(identifiers[0], pathBuffer))
+    {
+        path = pathBuffer;
+    }
+    if (identifiers != nullptr && identifiers[1] != nullptr && SHGetPathFromIDListW(identifiers[1], pathBuffer))
+    {
+        newPath = pathBuffer;
+    }
+    SHChangeNotification_Unlock(lock);
+
+    if (!path.empty())
+    {
+        const ULONGLONG now = GetTickCount64();
+        if (event == recentShellEvent_ && path == recentShellPath_ && newPath == recentShellNewPath_ &&
+            now - recentShellEventTick_ < 1000)
+        {
+            return;
+        }
+        recentShellEvent_ = event;
+        recentShellPath_ = path;
+        recentShellNewPath_ = newPath;
+        recentShellEventTick_ = now;
+        panel_.HandleShellChange(event, path, newPath);
+        ScheduleRefresh(200);
+    }
 }
 
 void CALLBACK Application::WinEventProc(
@@ -274,6 +340,9 @@ LRESULT Application::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
     {
+    case kShellChangeMessage:
+        OnShellNotification(wParam, lParam);
+        return 0;
     case WM_TIMER:
         if (wParam == kRefreshTimer)
         {
@@ -321,6 +390,11 @@ void Application::Shutdown()
     }
     shuttingDown_ = true;
     current_ = nullptr;
+    if (shellNotificationId_ != 0)
+    {
+        SHChangeNotifyDeregister(shellNotificationId_);
+        shellNotificationId_ = 0;
+    }
     for (auto& hook : hooks_)
     {
         if (hook != nullptr)

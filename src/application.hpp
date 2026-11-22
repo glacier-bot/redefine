@@ -33,6 +33,8 @@ private:
     void AddHook(DWORD minimumEvent, DWORD maximumEvent, DWORD processId = 0);
     void BindExplorerHooks(HWND explorer);
     void ClearExplorerHooks();
+    bool RegisterShellNotifications();
+    void OnShellNotification(WPARAM wParam, LPARAM lParam);
     void ScheduleRefresh(UINT delay = 40);
     void Refresh();
     void AddTrayIcon();
@@ -49,6 +51,11 @@ private:
     PanelWindow panel_;
     std::array<HWINEVENTHOOK, 9> hooks_ = {};
     DWORD explorerProcessId_ = 0;
+    ULONG shellNotificationId_ = 0;
+    LONG recentShellEvent_ = 0;
+    std::wstring recentShellPath_;
+    std::wstring recentShellNewPath_;
+    ULONGLONG recentShellEventTick_ = 0;
     bool trayIconAdded_ = false;
     bool shuttingDown_ = false;
 };

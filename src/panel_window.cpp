@@ -194,6 +194,20 @@ void PanelWindow::TogglePreview()
     InvalidateRect(window_, nullptr, FALSE);
 }
 
+void PanelWindow::HandleShellChange(LONG event, const std::wstring& path, const std::wstring& newPath)
+{
+    SaveRequest request;
+    request.shellChange = true;
+    request.shellEvent = event;
+    request.path = path;
+    request.newPath = newPath;
+    {
+        std::lock_guard lock(saveMutex_);
+        saveQueue_.push_back(std::move(request));
+    }
+    saveCondition_.notify_one();
+}
+
 void PanelWindow::ShowFor(HWND explorer, const ExplorerSnapshot& snapshot)
 {
     if (explorer == nullptr || !IsWindow(explorer) || IsIconic(explorer))
@@ -433,6 +447,13 @@ void PanelWindow::SaveWorker()
             }
             request = std::move(saveQueue_.front());
             saveQueue_.pop_front();
+        }
+
+        if (request.shellChange)
+        {
+            std::wstring error;
+            repository_.ApplyShellChange(request.shellEvent, request.path, request.newPath, error);
+            continue;
         }
 
         std::wstring error;

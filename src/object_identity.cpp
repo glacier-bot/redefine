@@ -47,5 +47,10 @@ std::optional<ObjectIdentity> ReadObjectIdentity(const std::wstring& path, std::
     static_assert(sizeof(identity.fileId) == sizeof(information.FileId.Identifier));
     memcpy(identity.fileId.data(), information.FileId.Identifier, sizeof(identity.fileId));
     identity.kind = isDirectory ? NoteObjectKind::Directory : NoteObjectKind::File;
+    BY_HANDLE_FILE_INFORMATION basicInformation = {};
+    if (GetFileInformationByHandle(handle.get(), &basicInformation))
+    {
+        identity.linkCount = basicInformation.nNumberOfLinks;
+    }
     return identity;
 }

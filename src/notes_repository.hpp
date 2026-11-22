@@ -27,6 +27,11 @@ public:
         const std::wstring& path,
         const std::wstring& markdown,
         std::wstring& error) const;
+    bool ApplyShellChange(
+        LONG event,
+        const std::wstring& path,
+        const std::wstring& newPath,
+        std::wstring& error) const;
 
 private:
     std::filesystem::path databasePath_;

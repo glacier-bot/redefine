@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.30)
-project(redefine VERSION 0.1.0 LANGUAGES C CXX)
+project(redefine VERSION 0.2.0 LANGUAGES C CXX)
 
 include(cmake/dependencies.cmake)
 
@@ -7,6 +7,8 @@ add_executable(redefine WIN32
     src/main.cpp
     src/application.cpp
     src/explorer_tracker.cpp
+    src/notes_repository.cpp
+    src/object_identity.cpp
     src/panel_window.cpp
 )
 
@@ -21,6 +23,7 @@ target_compile_definitions(redefine PRIVATE
 target_compile_options(redefine PRIVATE /W4 /permissive- /Zc:__cplusplus)
 target_link_libraries(redefine PRIVATE
     WIL::WIL
+    unofficial::sqlite3::sqlite3
     d2d1
     dwrite
     dwmapi

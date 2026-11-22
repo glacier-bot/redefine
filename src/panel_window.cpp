@@ -1,25 +1,45 @@
 #include "panel_window.hpp"
 
+#include <RichEdit.h>
 #include <Windowsx.h>
+#include <wil/resource.h>
 
 #include <algorithm>
-#include <string>
+#include <memory>
+#include <optional>
 
 namespace
 {
 constexpr wchar_t kPanelClassName[] = L"RedefinePanelWindow";
+constexpr UINT_PTR kSaveTimer = 2;
+constexpr UINT kSaveCompletedMessage = WM_APP + 20;
+constexpr int kEditorId = 2001;
 
 bool Contains(const D2D1_RECT_F& rectangle, float x, float y)
 {
     return x >= rectangle.left && x <= rectangle.right && y >= rectangle.top && y <= rectangle.bottom;
 }
+
+std::wstring EditorText(HWND editor)
+{
+    const int length = GetWindowTextLengthW(editor);
+    std::wstring text(static_cast<size_t>(length), L'\0');
+    GetWindowTextW(editor, text.data(), length + 1);
+    return text;
+}
 }
 
 PanelWindow::~PanelWindow()
 {
+    QueuePendingSave();
+    StopSaveWorker();
     if (window_ != nullptr && IsWindow(window_))
     {
         DestroyWindow(window_);
+    }
+    if (richEditLibrary_ != nullptr)
+    {
+        FreeLibrary(richEditLibrary_);
     }
 }
 
@@ -37,6 +57,12 @@ bool PanelWindow::Create(HINSTANCE instance)
         return false;
     }
 
+    richEditLibrary_ = LoadLibraryW(L"Msftedit.dll");
+    if (richEditLibrary_ == nullptr)
+    {
+        return false;
+    }
+
     window_ = CreateWindowExW(
         WS_EX_TOOLWINDOW,
         kPanelClassName,
@@ -50,7 +76,47 @@ bool PanelWindow::Create(HINSTANCE instance)
         nullptr,
         instance,
         this);
-    return window_ != nullptr;
+    if (window_ == nullptr)
+    {
+        return false;
+    }
+
+    editor_ = CreateWindowExW(
+        WS_EX_CLIENTEDGE,
+        MSFTEDIT_CLASS,
+        nullptr,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
+        0,
+        0,
+        0,
+        0,
+        window_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kEditorId)),
+        instance,
+        nullptr);
+    if (editor_ == nullptr)
+    {
+        return false;
+    }
+
+    SendMessageW(editor_, EM_SETTEXTMODE, TM_PLAINTEXT, 0);
+    SendMessageW(editor_, EM_SETEVENTMASK, 0, ENM_CHANGE);
+    SendMessageW(editor_, EM_EXLIMITTEXT, 0, 1024 * 1024);
+    SendMessageW(editor_, EM_SETBKGNDCOLOR, 0, RGB(255, 255, 255));
+    SendMessageW(editor_, EM_SETUNDOLIMIT, 100, 0);
+
+    CHARFORMAT2W format = {};
+    format.cbSize = sizeof(format);
+    format.dwMask = CFM_FACE | CFM_SIZE | CFM_CHARSET | CFM_COLOR;
+    format.yHeight = 280;
+    format.bCharSet = DEFAULT_CHARSET;
+    format.crTextColor = RGB(32, 36, 42);
+    wcscpy_s(format.szFaceName, L"Microsoft YaHei UI");
+    SendMessageW(editor_, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&format));
+
+    EnableWindow(editor_, FALSE);
+    saveThread_ = std::thread(&PanelWindow::SaveWorker, this);
+    return true;
 }
 
 HWND PanelWindow::Hwnd() const
@@ -60,6 +126,7 @@ HWND PanelWindow::Hwnd() const
 
 void PanelWindow::Hide()
 {
+    QueuePendingSave();
     if (window_ != nullptr)
     {
         ShowWindow(window_, SW_HIDE);
@@ -97,6 +164,7 @@ void PanelWindow::ShowFor(HWND explorer, const ExplorerSnapshot& snapshot)
 
     explorer_ = explorer;
     snapshot_ = snapshot;
+    RefreshTarget();
 
     RECT client = {};
     GetClientRect(explorer, &client);
@@ -142,6 +210,7 @@ void PanelWindow::ShowFor(HWND explorer, const ExplorerSnapshot& snapshot)
         width,
         height,
         SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    UpdateEditorLayout();
     InvalidateRect(window_, nullptr, FALSE);
 }
 
@@ -153,29 +222,185 @@ void PanelWindow::Reposition()
     }
 }
 
-std::wstring PanelWindow::ContentText() const
+void PanelWindow::RefreshTarget()
 {
+    std::wstring path;
+    std::wstring description;
+    std::wstring error;
+    std::optional<ObjectIdentity> identity;
+
     if (!snapshot_.error.empty())
     {
-        return snapshot_.error;
+        error = snapshot_.error;
     }
-
-    std::wstring text = L"当前目录\n";
-    text += snapshot_.location.empty() ? L"无法读取" : snapshot_.location;
-    text += L"\n\n选中状态\n";
-    if (snapshot_.selection_count == 0)
+    else if (snapshot_.selection_count > 1)
     {
-        text += L"未选中项目，将使用当前文件夹";
+        error = L"已选中多项，请选择单个文件或文件夹后编辑备注";
     }
-    else if (snapshot_.selection_count == 1)
+    else if (!snapshot_.file_system_location)
     {
-        text += snapshot_.selected_path.empty() ? L"已选中 1 项，但无法读取路径" : snapshot_.selected_path;
+        error = L"当前位置不是可识别的本地文件系统目录";
     }
     else
     {
-        text += L"已选中 " + std::to_wstring(snapshot_.selection_count) + L" 项";
+        path = snapshot_.selection_count == 1 ? snapshot_.selected_path : snapshot_.location;
+        identity = ReadObjectIdentity(path, error);
+        if (identity)
+        {
+            description = identity->kind == NoteObjectKind::Directory ? L"当前文件夹\n" : L"选中文件\n";
+            description += path;
+        }
     }
-    return text;
+
+    if (identity && targetValid_ && path == targetPath_ && *identity == targetIdentity_)
+    {
+        return;
+    }
+
+    QueuePendingSave();
+    ++generation_;
+    targetPath_ = path;
+    targetDescription_ = description;
+    targetValid_ = identity.has_value();
+    if (identity)
+    {
+        targetIdentity_ = *identity;
+    }
+
+    loadingText_ = true;
+    SetWindowTextW(editor_, L"");
+    loadingText_ = false;
+    EnableWindow(editor_, targetValid_);
+
+    if (!targetValid_)
+    {
+        noteStatus_ = error;
+        targetDescription_.clear();
+        UpdateEditorLayout();
+        return;
+    }
+
+    StoredNote note;
+    const auto storedNote = repository_.Load(targetIdentity_, targetPath_, error);
+    if (!error.empty())
+    {
+        noteStatus_ = error;
+        targetValid_ = false;
+        EnableWindow(editor_, FALSE);
+        UpdateEditorLayout();
+        return;
+    }
+    if (storedNote)
+    {
+        note = *storedNote;
+    }
+
+    loadingText_ = true;
+    SetWindowTextW(editor_, note.markdown.c_str());
+    loadingText_ = false;
+    SendMessageW(editor_, EM_SETMODIFY, FALSE, 0);
+    SendMessageW(editor_, EM_SETSEL, 0, 0);
+    noteStatus_ = storedNote ? L"备注已加载，修改后自动保存" : L"尚无备注，输入后自动保存";
+    UpdateEditorLayout();
+}
+
+void PanelWindow::OnEditChanged()
+{
+    if (loadingText_ || !targetValid_)
+    {
+        return;
+    }
+    noteStatus_ = L"有未保存的修改";
+    KillTimer(window_, kSaveTimer);
+    SetTimer(window_, kSaveTimer, 600, nullptr);
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+void PanelWindow::QueuePendingSave()
+{
+    if (window_ == nullptr || KillTimer(window_, kSaveTimer) == 0 || !targetValid_)
+    {
+        return;
+    }
+
+    SaveRequest request;
+    request.generation = generation_;
+    request.identity = targetIdentity_;
+    request.path = targetPath_;
+    request.markdown = EditorText(editor_);
+    {
+        std::lock_guard lock(saveMutex_);
+        saveQueue_.push_back(std::move(request));
+    }
+    noteStatus_ = L"正在保存…";
+    saveCondition_.notify_one();
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+void PanelWindow::SaveWorker()
+{
+    while (true)
+    {
+        SaveRequest request;
+        {
+            std::unique_lock lock(saveMutex_);
+            saveCondition_.wait(lock, [this]() { return stoppingSaveWorker_ || !saveQueue_.empty(); });
+            if (saveQueue_.empty())
+            {
+                if (stoppingSaveWorker_)
+                {
+                    return;
+                }
+                continue;
+            }
+            request = std::move(saveQueue_.front());
+            saveQueue_.pop_front();
+        }
+
+        std::wstring error;
+        repository_.Save(request.identity, request.path, request.markdown, error);
+        auto result = std::make_unique<SaveResult>();
+        result->generation = request.generation;
+        result->error = std::move(error);
+        if (PostMessageW(window_, kSaveCompletedMessage, 0, reinterpret_cast<LPARAM>(result.get())))
+        {
+            result.release();
+        }
+    }
+}
+
+void PanelWindow::StopSaveWorker()
+{
+    {
+        std::lock_guard lock(saveMutex_);
+        stoppingSaveWorker_ = true;
+    }
+    saveCondition_.notify_one();
+    if (saveThread_.joinable())
+    {
+        saveThread_.join();
+    }
+}
+
+void PanelWindow::UpdateEditorLayout()
+{
+    if (editor_ == nullptr)
+    {
+        return;
+    }
+    RECT client = {};
+    GetClientRect(window_, &client);
+    const UINT dpi = GetDpiForWindow(window_);
+    const int margin = MulDiv(16, dpi, 96);
+    const int top = MulDiv(180, dpi, 96);
+    const int width = std::max(0, static_cast<int>(client.right) - margin * 2);
+    const int height = std::max(0, static_cast<int>(client.bottom) - top - margin);
+    const bool visible = !collapsed_ && height > 0;
+    ShowWindow(editor_, visible ? SW_SHOW : SW_HIDE);
+    if (visible)
+    {
+        SetWindowPos(editor_, nullptr, margin, top, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
 }
 
 bool PanelWindow::EnsureResources()
@@ -219,13 +444,15 @@ bool PanelWindow::EnsureResources()
             format);
     };
     if (FAILED(createFormat(20.0F, DWRITE_FONT_WEIGHT_SEMI_BOLD, titleFormat_.put())) ||
-        FAILED(createFormat(15.0F, DWRITE_FONT_WEIGHT_NORMAL, bodyFormat_.put())) ||
+        FAILED(createFormat(13.5F, DWRITE_FONT_WEIGHT_NORMAL, bodyFormat_.put())) ||
+        FAILED(createFormat(12.5F, DWRITE_FONT_WEIGHT_NORMAL, statusFormat_.put())) ||
         FAILED(createFormat(13.0F, DWRITE_FONT_WEIGHT_NORMAL, buttonFormat_.put())))
     {
         return false;
     }
 
     bodyFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+    statusFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
     buttonFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     buttonFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     return true;
@@ -246,10 +473,12 @@ void PanelWindow::Render()
     wil::com_ptr<ID2D1SolidColorBrush> background;
     wil::com_ptr<ID2D1SolidColorBrush> border;
     wil::com_ptr<ID2D1SolidColorBrush> text;
+    wil::com_ptr<ID2D1SolidColorBrush> secondaryText;
     wil::com_ptr<ID2D1SolidColorBrush> accent;
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xF7F8FA), background.put());
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xC7CCD4), border.put());
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x20242A), text.put());
+    renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x626B78), secondaryText.put());
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xE7EEF8), accent.put());
 
     renderTarget_->BeginDraw();
@@ -271,20 +500,26 @@ void PanelWindow::Render()
     {
         const bool controlsVisible = hovering_ || GetForegroundWindow() == window_;
         const float titleRight = controlsVisible ? width - 188.0F : width - 16.0F;
+        const wchar_t* title = !targetValid_ ? L"对象备注" : targetIdentity_.kind == NoteObjectKind::Directory ? L"文件夹备注" : L"文件备注";
         renderTarget_->DrawText(
-            L"备注跟踪原型",
-            6,
+            title,
+            static_cast<UINT32>(wcslen(title)),
             titleFormat_.get(),
             D2D1::RectF(16.0F, 12.0F, std::max(16.0F, titleRight), 46.0F),
             text.get());
 
-        const std::wstring content = ContentText();
         renderTarget_->DrawText(
-            content.c_str(),
-            static_cast<UINT32>(content.size()),
+            targetDescription_.c_str(),
+            static_cast<UINT32>(targetDescription_.size()),
             bodyFormat_.get(),
-            D2D1::RectF(16.0F, 58.0F, width - 16.0F, height - 16.0F),
+            D2D1::RectF(16.0F, 52.0F, width - 16.0F, 134.0F),
             text.get());
+        renderTarget_->DrawText(
+            noteStatus_.c_str(),
+            static_cast<UINT32>(noteStatus_.size()),
+            statusFormat_.get(),
+            D2D1::RectF(16.0F, 138.0F, width - 16.0F, 172.0F),
+            secondaryText.get());
 
         collapseButton_ = D2D1::RectF(width - 88.0F, 12.0F, width - 12.0F, 42.0F);
         sideButton_ = D2D1::RectF(width - 174.0F, 12.0F, width - 96.0F, 42.0F);
@@ -334,6 +569,7 @@ LRESULT PanelWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         {
             renderTarget_->Resize(D2D1::SizeU(LOWORD(lParam), HIWORD(lParam)));
         }
+        UpdateEditorLayout();
         return 0;
     case WM_DPICHANGED:
         Reposition();
@@ -349,8 +585,14 @@ LRESULT PanelWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     }
     case WM_MOUSELEAVE:
-        UpdateHoverState(false);
+    {
+        POINT cursor = {};
+        GetCursorPos(&cursor);
+        RECT bounds = {};
+        GetWindowRect(window_, &bounds);
+        UpdateHoverState(PtInRect(&bounds, cursor) != FALSE);
         return 0;
+    }
     case WM_LBUTTONUP:
     {
         if (collapsed_)
@@ -371,7 +613,30 @@ LRESULT PanelWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         }
         return 0;
     }
+    case WM_COMMAND:
+        if (reinterpret_cast<HWND>(lParam) == editor_ && HIWORD(wParam) == EN_CHANGE)
+        {
+            OnEditChanged();
+        }
+        return 0;
+    case WM_TIMER:
+        if (wParam == kSaveTimer)
+        {
+            QueuePendingSave();
+        }
+        return 0;
+    case kSaveCompletedMessage:
+    {
+        std::unique_ptr<SaveResult> result(reinterpret_cast<SaveResult*>(lParam));
+        if (result && result->generation == generation_)
+        {
+            noteStatus_ = result->error.empty() ? L"已自动保存" : result->error;
+            InvalidateRect(window_, nullptr, FALSE);
+        }
+        return 0;
+    }
     case WM_NCDESTROY:
+        editor_ = nullptr;
         window_ = nullptr;
         return 0;
     default:

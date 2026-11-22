@@ -71,7 +71,6 @@ private:
     MarkdownPreview preview_;
     ObjectIdentity targetIdentity_;
     std::wstring targetPath_;
-    std::wstring targetDescription_;
     std::wstring noteStatus_;
     std::uint64_t generation_ = 0;
     bool targetValid_ = false;

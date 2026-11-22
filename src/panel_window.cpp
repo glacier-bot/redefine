@@ -299,7 +299,6 @@ void PanelWindow::Reposition()
 void PanelWindow::RefreshTarget()
 {
     std::wstring path;
-    std::wstring description;
     std::wstring error;
     std::optional<ObjectIdentity> identity;
 
@@ -319,11 +318,6 @@ void PanelWindow::RefreshTarget()
     {
         path = snapshot_.selection_count == 1 ? snapshot_.selected_path : snapshot_.location;
         identity = ReadObjectIdentity(path, error);
-        if (identity)
-        {
-            description = identity->kind == NoteObjectKind::Directory ? L"当前文件夹\n" : L"选中文件\n";
-            description += path;
-        }
     }
 
     if (identity && targetValid_ && path == targetPath_ && *identity == targetIdentity_)
@@ -334,7 +328,6 @@ void PanelWindow::RefreshTarget()
     QueuePendingSave();
     ++generation_;
     targetPath_ = path;
-    targetDescription_ = description;
     targetValid_ = identity.has_value();
     if (identity)
     {
@@ -349,7 +342,6 @@ void PanelWindow::RefreshTarget()
     if (!targetValid_)
     {
         noteStatus_ = error;
-        targetDescription_.clear();
         preview_.SetMarkdown(L"");
         previewScroll_ = 0.0F;
         previewContentHeight_ = 0.0F;
@@ -474,7 +466,7 @@ D2D1_RECT_F PanelWindow::ContentBounds() const
     GetClientRect(window_, &client);
     const UINT dpi = GetDpiForWindow(window_);
     const int margin = MulDiv(14, dpi, 96);
-    const int top = MulDiv(140, dpi, 96);
+    const int top = MulDiv(74, dpi, 96);
     return D2D1::RectF(
         static_cast<float>(margin),
         static_cast<float>(top),
@@ -612,16 +604,10 @@ void PanelWindow::Render()
             text.get());
 
         renderTarget_->DrawText(
-            targetDescription_.c_str(),
-            static_cast<UINT32>(targetDescription_.size()),
-            bodyFormat_.get(),
-            D2D1::RectF(14.0F, 40.0F, width - 14.0F, 106.0F),
-            text.get());
-        renderTarget_->DrawText(
             noteStatus_.c_str(),
             static_cast<UINT32>(noteStatus_.size()),
             statusFormat_.get(),
-            D2D1::RectF(14.0F, 110.0F, width - 14.0F, 134.0F),
+            D2D1::RectF(14.0F, 42.0F, width - 14.0F, 66.0F),
             secondaryText.get());
 
         previewButton_ = D2D1::RectF(width - 204.0F, 8.0F, width - 150.0F, 34.0F);
